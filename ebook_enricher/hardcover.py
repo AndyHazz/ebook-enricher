@@ -1,12 +1,14 @@
 """Hardcover GraphQL client.
 
-One query fetches book + series + tags + description + author in one
-round trip. We ask for the top 3 matches by users_read_count so a
-popular book outranks a long-tail near-duplicate.
+Uses Hardcover's full-text `search` endpoint. Earlier iterations used the
+`books` table with `_ilike` wildcards for fuzzy matching, but that operator
+is disabled on the Hardcover server ("ilike and related operations are not
+permitted on this server"). The `search` endpoint is designed for this
+use case and gives access to a pre-scored hit list.
 
 Rate limits: 60 req/min. We use async httpx and retry once on 429 after
-a short sleep. Anything else (500s, network) propagates as an exception —
-the caller decides how to report it.
+a short sleep. HTTP 401/403 is classified separately as an auth problem;
+other HTTP errors and network failures propagate for the caller to handle.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import httpx
 HARDCOVER_URL = "https://api.hardcover.app/v1/graphql"
 TIMEOUT_S = 20
 RETRY_SLEEP_S = 2
+PER_PAGE = 3
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ class HardcoverAuthError(Exception):
 
 @dataclass
 class HardcoverBook:
-    id: int
+    id: str
     title: str
     author: str
     description: Optional[str]
@@ -50,48 +53,12 @@ class HardcoverBook:
 
 
 QUERY = """
-query SearchBook($title: String!, $author: String!) {
-  books(
-    where: {
-      _and: [
-        { title: { _ilike: $title } },
-        { contributions: { author: { name: { _ilike: $author } } } }
-      ]
-    }
-    order_by: { users_read_count: desc }
-    limit: 3
-  ) {
-    id
-    title
-    description
-    cached_tags
-    book_series {
-      position
-      featured
-      series { name }
-    }
-    contributions {
-      author { name }
-    }
+query SearchBooks($q: String!, $per_page: Int!) {
+  search(query: $q, query_type: "books", per_page: $per_page, page: 1) {
+    results
   }
 }
 """
-
-
-def _extract_genres(cached_tags: Optional[dict]) -> list[str]:
-    if not cached_tags:
-        return []
-    genre_tags = cached_tags.get("Genre") or []
-    # Sort by count desc if present; take top 5 tag names
-    def _sort_key(entry: dict) -> int:
-        return -int(entry.get("count") or 0)
-    sorted_tags = sorted(genre_tags, key=_sort_key)
-    names = []
-    for entry in sorted_tags[:5]:
-        name = entry.get("tag") or entry.get("name")
-        if name:
-            names.append(name)
-    return names
 
 
 def _format_position(pos) -> Optional[str]:
@@ -103,39 +70,77 @@ def _format_position(pos) -> Optional[str]:
     return str(pos)
 
 
-def _pick_series(book_series: list[dict]) -> tuple[Optional[str], Optional[str]]:
-    if not book_series:
+def _pick_series(doc: dict) -> tuple[Optional[str], Optional[str]]:
+    """Extract series name + position from a search hit's document.
+
+    The search response exposes one `featured_series` object per document
+    which is the book's primary series (if any). `featured_series_position`
+    is also available as a top-level field.
+    """
+    featured = doc.get("featured_series") or {}
+    if not featured:
         return None, None
-    featured = next((s for s in book_series if s.get("featured")), None)
-    chosen = featured or book_series[0]
-    name = (chosen.get("series") or {}).get("name")
-    pos = chosen.get("position")
+    series = featured.get("series") or {}
+    name = series.get("name") or None
+    pos = featured.get("position")
+    if pos is None:
+        pos = doc.get("featured_series_position")
     return name, _format_position(pos)
 
 
-def _first_author(contributions: list[dict]) -> str:
-    if not contributions:
-        return ""
-    return (contributions[0].get("author") or {}).get("name") or ""
+def _first_author(doc: dict) -> str:
+    """Prefer structured `contributions[0].author.name`, fall back to `author_names[0]`."""
+    contributions = doc.get("contributions") or []
+    if contributions:
+        author_obj = contributions[0].get("author") or {}
+        name = author_obj.get("name")
+        if name:
+            return name
+    names = doc.get("author_names") or []
+    return names[0] if names else ""
 
 
-def _parse_book(raw: dict) -> Optional[HardcoverBook]:
-    # Hardcover is in beta — schema can be unstable. Skip entries missing
-    # required fields rather than crashing the whole query.
-    book_id = raw.get("id")
-    title = raw.get("title")
+def _extract_genres(doc: dict) -> list[str]:
+    """Take up to 5 genre tags. The search response already returns them
+    as a flat list of strings, pre-ranked by Hardcover's own relevance.
+    """
+    genres = doc.get("genres") or []
+    # Preserve order; dedupe case-insensitively to avoid duplicates like
+    # "Nonfiction" vs "nonfiction".
+    seen = set()
+    out: list[str] = []
+    for g in genres:
+        if not g:
+            continue
+        key = g.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(g.strip())
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _parse_hit(hit: dict) -> Optional[HardcoverBook]:
+    """Parse a single search hit. Hardcover is in beta — skip malformed
+    hits rather than crashing the whole query.
+    """
+    doc = hit.get("document") or {}
+    book_id = doc.get("id")
+    title = doc.get("title")
     if book_id is None or not title:
-        logger.warning("Skipping malformed Hardcover entry: id=%r title=%r", book_id, title)
+        logger.warning("Skipping malformed Hardcover hit: id=%r title=%r", book_id, title)
         return None
-    series_name, series_pos = _pick_series(raw.get("book_series") or [])
+    series_name, series_pos = _pick_series(doc)
     return HardcoverBook(
-        id=book_id,
+        id=str(book_id),
         title=title,
-        author=_first_author(raw.get("contributions") or []),
-        description=raw.get("description"),
+        author=_first_author(doc),
+        description=doc.get("description"),
         series_name=series_name,
         series_position=series_pos,
-        genres=_extract_genres(raw.get("cached_tags")),
+        genres=_extract_genres(doc),
     )
 
 
@@ -153,7 +158,10 @@ async def _post(client: httpx.AsyncClient, token: str, variables: dict):
 
 
 async def search_book(title: str, author: str, token: str) -> list[HardcoverBook]:
-    variables = {"title": f"%{title}%", "author": f"%{author}%"}
+    # Combine title and author into one natural-language query — Hardcover's
+    # search indexes both title and author_names by default.
+    query_text = f"{title} {author}".strip()
+    variables = {"q": query_text, "per_page": PER_PAGE}
     async with httpx.AsyncClient() as client:
         for attempt in range(2):
             status, resp = await _post(client, token, variables)
@@ -166,7 +174,10 @@ async def search_book(title: str, author: str, token: str) -> list[HardcoverBook
             payload = resp.json()
             if payload.get("errors"):
                 raise HardcoverAuthError(f"Hardcover GraphQL errors: {payload['errors']}")
-            books = (payload.get("data") or {}).get("books") or []
-            parsed = [_parse_book(b) for b in books]
+            results = (
+                (payload.get("data") or {}).get("search") or {}
+            ).get("results") or {}
+            hits = results.get("hits") or []
+            parsed = [_parse_hit(h) for h in hits]
             return [p for p in parsed if p is not None]
     return []

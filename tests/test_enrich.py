@@ -10,7 +10,7 @@ from ebook_enricher.hardcover import HardcoverBook
 
 def _make_hc_book(**overrides) -> HardcoverBook:
     defaults = dict(
-        id=1,
+        id="1",
         title="Test Book Title",
         author="Test Author",
         description="A test description.",

@@ -2,48 +2,51 @@ import httpx
 import pytest
 import respx
 
-from ebook_enricher.hardcover import HardcoverBook, search_book
+from ebook_enricher.hardcover import (
+    HardcoverAuthError,
+    HardcoverBook,
+    RateLimitedError,
+    search_book,
+)
 
 
 HARDCOVER_URL = "https://api.hardcover.app/v1/graphql"
 
-SUCCESS_RESPONSE = {
-    "data": {
-        "books": [
-            {
-                "id": 1,
-                "title": "All the Skills",
-                "description": "A deckbuilding LitRPG adventure.",
-                "cached_tags": {
-                    "Genre": [
-                        {"tag": "LitRPG", "count": 50},
-                        {"tag": "Fantasy", "count": 30},
-                        {"tag": "Progression Fantasy", "count": 20},
-                    ]
-                },
-                "book_series": [
-                    {
-                        "position": 1.0,
-                        "featured": True,
-                        "series": {"name": "All the Skills"},
-                    }
-                ],
-                "contributions": [
-                    {"author": {"name": "Honour Rae"}}
-                ],
-            }
-        ]
-    }
-}
 
-EMPTY_RESPONSE = {"data": {"books": []}}
+def _search_response(hits: list[dict]) -> dict:
+    """Build a Hardcover search response with the given hit documents."""
+    return {
+        "data": {
+            "search": {
+                "results": {
+                    "found": len(hits),
+                    "hits": [{"document": h} for h in hits],
+                }
+            }
+        }
+    }
+
+
+SUCCESS_HIT = {
+    "id": "638191",
+    "title": "All the Skills",
+    "description": "A deckbuilding LitRPG adventure.",
+    "author_names": ["Honour Rae"],
+    "contributions": [{"author": {"name": "Honour Rae"}}],
+    "genres": ["LitRPG", "Fantasy", "Progression Fantasy"],
+    "featured_series": {
+        "featured": True,
+        "position": 1.0,
+        "series": {"name": "All the Skills"},
+    },
+}
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_successful_search():
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=SUCCESS_RESPONSE)
+        return_value=httpx.Response(200, json=_search_response([SUCCESS_HIT]))
     )
     results = await search_book("All the Skills", "Honour Rae", token="fake")
     assert len(results) == 1
@@ -61,7 +64,7 @@ async def test_successful_search():
 @respx.mock
 async def test_empty_search():
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=EMPTY_RESPONSE)
+        return_value=httpx.Response(200, json=_search_response([]))
     )
     results = await search_book("Unknown", "Nobody", token="fake")
     assert results == []
@@ -73,7 +76,7 @@ async def test_rate_limited_retries_once():
     route = respx.post(HARDCOVER_URL).mock(
         side_effect=[
             httpx.Response(429),
-            httpx.Response(200, json=SUCCESS_RESPONSE),
+            httpx.Response(200, json=_search_response([SUCCESS_HIT])),
         ]
     )
     results = await search_book("Test", "Test", token="fake")
@@ -84,71 +87,26 @@ async def test_rate_limited_retries_once():
 @pytest.mark.asyncio
 @respx.mock
 async def test_rate_limited_twice_raises():
-    respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(429)
-    )
-    from ebook_enricher.hardcover import RateLimitedError
+    respx.post(HARDCOVER_URL).mock(return_value=httpx.Response(429))
     with pytest.raises(RateLimitedError):
         await search_book("Test", "Test", token="fake")
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_series_without_featured_flag_still_picked():
-    """If no entry is featured, first entry wins."""
-    payload = {
-        "data": {
-            "books": [
-                {
-                    "id": 2,
-                    "title": "Book",
-                    "description": "Desc",
-                    "cached_tags": {},
-                    "book_series": [
-                        {
-                            "position": 2.0,
-                            "featured": False,
-                            "series": {"name": "First Series"},
-                        },
-                        {
-                            "position": 1.0,
-                            "featured": False,
-                            "series": {"name": "Second Series"},
-                        },
-                    ],
-                    "contributions": [{"author": {"name": "Author"}}],
-                }
-            ]
-        }
+async def test_standalone_book_has_no_series():
+    standalone = {
+        "id": "1",
+        "title": "Standalone",
+        "description": "No series.",
+        "author_names": ["Author"],
+        "featured_series": {},
+        "genres": [],
     }
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=payload)
+        return_value=httpx.Response(200, json=_search_response([standalone]))
     )
-    results = await search_book("Book", "Author", token="fake")
-    assert results[0].series_name == "First Series"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_no_series_returns_none():
-    payload = {
-        "data": {
-            "books": [
-                {
-                    "id": 3,
-                    "title": "Standalone",
-                    "description": "No series.",
-                    "cached_tags": {},
-                    "book_series": [],
-                    "contributions": [{"author": {"name": "A"}}],
-                }
-            ]
-        }
-    }
-    respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=payload)
-    )
-    results = await search_book("Standalone", "A", token="fake")
+    results = await search_book("Standalone", "Author", token="fake")
     assert results[0].series_name is None
     assert results[0].series_position is None
 
@@ -163,99 +121,93 @@ async def test_graphql_errors_raise():
     respx.post(HARDCOVER_URL).mock(
         return_value=httpx.Response(200, json=error_payload)
     )
-    from ebook_enricher.hardcover import HardcoverAuthError
     with pytest.raises(HardcoverAuthError, match="Hardcover GraphQL errors"):
         await search_book("Any", "Any", token="fake")
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_malformed_entry_is_skipped():
-    # Second entry is missing `id` — must be dropped, but first is returned.
-    payload = {
-        "data": {
-            "books": [
-                {
-                    "id": 1,
-                    "title": "Good Book",
-                    "description": None,
-                    "cached_tags": {},
-                    "book_series": [],
-                    "contributions": [{"author": {"name": "Author"}}],
-                },
-                {
-                    # No id, no title — malformed
-                    "description": "bad",
-                    "cached_tags": {},
-                    "book_series": [],
-                    "contributions": [],
-                },
-            ]
-        }
-    }
+async def test_malformed_hit_is_skipped():
+    good = SUCCESS_HIT
+    malformed = {"description": "bad", "genres": []}
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=payload)
+        return_value=httpx.Response(200, json=_search_response([good, malformed]))
     )
-    results = await search_book("Good", "Author", token="fake")
+    results = await search_book("All the Skills", "Honour Rae", token="fake")
     assert len(results) == 1
-    assert results[0].title == "Good Book"
+    assert results[0].title == "All the Skills"
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_integer_series_position_formatted_without_decimal():
-    payload = {
-        "data": {
-            "books": [
-                {
-                    "id": 5,
-                    "title": "Book 1",
-                    "description": None,
-                    "cached_tags": {},
-                    "book_series": [
-                        {
-                            "position": 1.0,
-                            "featured": True,
-                            "series": {"name": "The Series"},
-                        }
-                    ],
-                    "contributions": [{"author": {"name": "A"}}],
-                }
-            ]
-        }
+    hit = {
+        **SUCCESS_HIT,
+        "featured_series": {"featured": True, "position": 1.0, "series": {"name": "X"}},
     }
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=payload)
+        return_value=httpx.Response(200, json=_search_response([hit]))
     )
-    results = await search_book("Book 1", "A", token="fake")
+    results = await search_book("x", "y", token="fake")
     assert results[0].series_position == "1"
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_fractional_series_position_preserved():
-    payload = {
-        "data": {
-            "books": [
-                {
-                    "id": 6,
-                    "title": "Novella",
-                    "description": None,
-                    "cached_tags": {},
-                    "book_series": [
-                        {
-                            "position": 1.5,
-                            "featured": True,
-                            "series": {"name": "The Series"},
-                        }
-                    ],
-                    "contributions": [{"author": {"name": "A"}}],
-                }
-            ]
-        }
+    hit = {
+        **SUCCESS_HIT,
+        "featured_series": {"featured": True, "position": 1.5, "series": {"name": "X"}},
     }
     respx.post(HARDCOVER_URL).mock(
-        return_value=httpx.Response(200, json=payload)
+        return_value=httpx.Response(200, json=_search_response([hit]))
     )
-    results = await search_book("Novella", "A", token="fake")
+    results = await search_book("x", "y", token="fake")
     assert results[0].series_position == "1.5"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_genres_deduped_and_capped():
+    hit = {
+        **SUCCESS_HIT,
+        "genres": ["Nonfiction", "nonfiction", "Politics", "Essays", "History", "Memoir", "Economics"],
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=_search_response([hit]))
+    )
+    results = await search_book("x", "y", token="fake")
+    genres = results[0].genres
+    assert len(genres) == 5
+    lowered = [g.lower() for g in genres]
+    assert lowered.count("nonfiction") == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_author_from_contributions_preferred():
+    hit = {
+        **SUCCESS_HIT,
+        "contributions": [{"author": {"name": "Primary Author"}}],
+        "author_names": ["Fallback Name"],
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=_search_response([hit]))
+    )
+    results = await search_book("x", "y", token="fake")
+    assert results[0].author == "Primary Author"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_author_falls_back_to_author_names():
+    hit = {
+        **SUCCESS_HIT,
+        "contributions": [],
+        "author_names": ["Only In Names"],
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=_search_response([hit]))
+    )
+    results = await search_book("x", "y", token="fake")
+    assert results[0].author == "Only In Names"
