@@ -79,3 +79,100 @@ async def test_second_match_wins_if_first_is_low_confidence(bare_epub: Path):
 async def test_missing_file(tmp_path: Path):
     result = await enrich_file(tmp_path / "nope.epub", token="fake")
     assert result.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_rate_limited(bare_epub: Path):
+    from ebook_enricher.hardcover import RateLimitedError
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=RateLimitedError("two 429s")),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "rate_limited"
+    # EPUB must be untouched on rate limit
+    meta = read_meta(bare_epub)
+    assert meta.series is None
+
+
+@pytest.mark.asyncio
+async def test_hardcover_network_error(bare_epub: Path):
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=RuntimeError("connection refused")),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "error"
+    assert "hardcover_error" in (result.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_write_failure_reported_as_error(bare_epub: Path):
+    good = _make_hc_book()
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(return_value=[good]),
+    ), patch(
+        "ebook_enricher.enrich.write_meta",
+        side_effect=IOError("disk full"),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "error"
+    assert "write_failed" in (result.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_preserves_existing_description_when_enriching_series(
+    bare_epub: Path, tmp_path: Path
+):
+    # Build a fixture with a description already present but no series.
+    # Enrichment should fill series but NOT overwrite description.
+    import zipfile
+    import shutil
+    from ebook_enricher.epub_meta import NS, _find_opf_path
+    from xml.etree import ElementTree as ET
+
+    # Copy bare fixture and inject a description
+    target = tmp_path / "has_desc.epub"
+    shutil.copy(bare_epub, target)
+
+    with zipfile.ZipFile(target) as zf:
+        opf_path = _find_opf_path(zf)
+        root = ET.fromstring(zf.read(opf_path))
+    metadata = root.find("opf:metadata", NS)
+    el = ET.SubElement(metadata, f"{{{NS['dc']}}}description")
+    el.text = "Pre-existing blurb that must not be overwritten."
+    new_opf = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    import tempfile, os
+    tmp_fd, tmp_zip = tempfile.mkstemp(suffix=".epub", dir=target.parent)
+    os.close(tmp_fd)
+    try:
+        with zipfile.ZipFile(target) as src, \
+             zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                if item.filename == opf_path:
+                    dst.writestr(item, new_opf)
+                elif item.filename == "mimetype":
+                    dst.writestr(item, src.read(item.filename), compress_type=zipfile.ZIP_STORED)
+                else:
+                    dst.writestr(item, src.read(item.filename))
+        shutil.move(tmp_zip, target)
+    finally:
+        Path(tmp_zip).unlink(missing_ok=True)
+
+    # Sanity: description is present, series is not
+    pre = read_meta(target)
+    assert pre.description == "Pre-existing blurb that must not be overwritten."
+    assert pre.series is None
+
+    # Enrich: Hardcover offers BOTH series and a different description
+    hc = _make_hc_book(description="A DIFFERENT description from Hardcover.")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(target, token="fake")
+    assert result.status == "enriched"
+
+    post = read_meta(target)
+    assert post.series == "Test Series"  # filled
+    # Existing description is preserved, NOT overwritten
+    assert post.description == "Pre-existing blurb that must not be overwritten."

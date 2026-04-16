@@ -12,7 +12,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+Status = Literal[
+    "enriched", "skipped", "no_match", "low_confidence", "rate_limited", "error"
+]
 
 from ebook_enricher.epub_meta import EpubMeta, read_meta, write_meta
 from ebook_enricher.hardcover import HardcoverBook, RateLimitedError, search_book
@@ -23,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EnrichResult:
-    status: str  # enriched | skipped | no_match | low_confidence | rate_limited | error
+    status: Status
     reason: Optional[str] = None
     series: Optional[str] = None  # For debugging
 
