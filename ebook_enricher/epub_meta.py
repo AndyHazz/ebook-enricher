@@ -77,10 +77,13 @@ def read_meta(path: Path) -> EpubMeta:
     series_index = None
     for meta in metadata.findall("opf:meta", NS):
         name = meta.attrib.get("name")
-        content = meta.attrib.get("content")
-        if name == "calibre:series" and content:
+        prop = meta.attrib.get("property")
+        # EPUB 2 style: <meta name="calibre:series" content="X"/>
+        # EPUB 3 style: <meta property="calibre:series">X</meta>
+        content = meta.attrib.get("content") or (meta.text.strip() if meta.text else None)
+        if (name == "calibre:series" or prop == "calibre:series") and content:
             series = content
-        elif name == "calibre:series_index" and content:
+        elif (name == "calibre:series_index" or prop == "calibre:series_index") and content:
             series_index = content
 
     return EpubMeta(
@@ -94,10 +97,21 @@ def read_meta(path: Path) -> EpubMeta:
 
 
 def _set_or_add_meta(metadata: ET.Element, name: str, content: str) -> None:
-    """Replace any existing <meta name="X"> element, or add a new one."""
+    """Replace any existing calibre-style meta element, or add a new one.
+
+    Handles both EPUB 2 (<meta name="X" content="Y"/>) and EPUB 3
+    (<meta property="X">Y</meta>) forms. An existing element of either
+    form is updated in-place; only when neither is present do we add
+    a new EPUB 2-style element.
+    """
     for meta in metadata.findall("opf:meta", NS):
         if meta.attrib.get("name") == name:
             meta.attrib["content"] = content
+            return
+        if meta.attrib.get("property") == name:
+            meta.text = content
+            # Clean up any stale content attribute from mixed-style edits
+            meta.attrib.pop("content", None)
             return
     meta = ET.SubElement(metadata, f"{{{NS['opf']}}}meta")
     meta.attrib["name"] = name
@@ -146,7 +160,7 @@ def write_meta(path: Path, meta: EpubMeta) -> None:
     new_opf_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     # Rewrite the zip with the modified OPF and the rest copied verbatim
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub")
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub", dir=path.parent)
     os.close(tmp_fd)
     try:
         with zipfile.ZipFile(path) as src, \

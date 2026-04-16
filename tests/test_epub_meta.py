@@ -56,3 +56,42 @@ def test_write_preserves_title_and_author(bare_epub: Path):
     assert meta.title == "Test Book Title"
     assert meta.author == "Test Author"
     assert meta.series == "New Series"
+
+
+def test_read_modern_epub_property_style(modern_epub: Path):
+    # EPUB 3 stores series via <meta property="calibre:series">X</meta>,
+    # not <meta name="..." content="X"/>. read_meta must see both forms.
+    meta = read_meta(modern_epub)
+    assert meta.series == "Modern Series"
+    assert meta.series_index == "3"
+
+
+def test_write_updates_existing_property_style(modern_epub: Path):
+    # If an EPUB already has property-style series, write_meta must update
+    # it in place, NOT add a second name-style element alongside.
+    write_meta(
+        modern_epub,
+        EpubMeta(
+            title="",
+            author="",
+            series="Updated Series",
+            series_index="5",
+        ),
+    )
+    meta = read_meta(modern_epub)
+    assert meta.series == "Updated Series"
+    assert meta.series_index == "5"
+
+    # Confirm no duplicate meta elements were added
+    import zipfile
+    from xml.etree import ElementTree as ET
+    from ebook_enricher.epub_meta import NS, _find_opf_path
+    with zipfile.ZipFile(modern_epub) as zf:
+        root = ET.fromstring(zf.read(_find_opf_path(zf)))
+    metadata = root.find("opf:metadata", NS)
+    series_metas = [
+        m for m in metadata.findall("opf:meta", NS)
+        if m.attrib.get("name") == "calibre:series"
+        or m.attrib.get("property") == "calibre:series"
+    ]
+    assert len(series_metas) == 1, f"Expected 1 series meta, got {len(series_metas)}"

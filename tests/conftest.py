@@ -77,3 +77,13 @@ def enriched_epub(tmp_path: Path) -> Path:
     <dc:description>Existing description.</dc:description>
     """
     return _build_epub(tmp_path / "enriched.epub", extra)
+
+
+@pytest.fixture
+def modern_epub(tmp_path: Path) -> Path:
+    """EPUB 3 using property-style meta elements (how modern Calibre writes)."""
+    extra = """
+    <meta property="calibre:series">Modern Series</meta>
+    <meta property="calibre:series_index">3</meta>
+    """
+    return _build_epub(tmp_path / "modern.epub", extra)
