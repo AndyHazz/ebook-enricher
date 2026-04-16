@@ -98,3 +98,10 @@ def test_healthy_statuses_also_reset(tmp_path: Path):
     t.record(_auth())
     t.record(_auth())
     assert not (tmp_path / STATUS_FILENAME).exists()
+
+
+def test_rate_limited_alone_triggers_network_epub(tmp_path: Path):
+    t = StatusTracker(tmp_path, threshold=3)
+    for _ in range(3):
+        t.record(_rate())
+    assert (tmp_path / STATUS_FILENAME).exists()

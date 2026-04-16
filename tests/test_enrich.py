@@ -203,3 +203,44 @@ async def test_preserves_existing_description_when_enriching_series(
     assert post.series == "Test Series"  # filled
     # Existing description is preserved, NOT overwritten
     assert post.description == "Pre-existing blurb that must not be overwritten."
+
+
+@pytest.mark.asyncio
+async def test_http_401_classified_as_auth_error(bare_epub: Path):
+    import httpx
+    response = httpx.Response(401, request=httpx.Request("POST", "https://api.hardcover.app/v1/graphql"))
+    err = httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=err),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "auth_error"
+    meta = read_meta(bare_epub)
+    assert meta.series is None
+
+
+@pytest.mark.asyncio
+async def test_http_403_classified_as_auth_error(bare_epub: Path):
+    import httpx
+    response = httpx.Response(403, request=httpx.Request("POST", "https://api.hardcover.app/v1/graphql"))
+    err = httpx.HTTPStatusError("Forbidden", request=response.request, response=response)
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=err),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "auth_error"
+
+
+@pytest.mark.asyncio
+async def test_http_503_classified_as_network_error(bare_epub: Path):
+    import httpx
+    response = httpx.Response(503, request=httpx.Request("POST", "https://api.hardcover.app/v1/graphql"))
+    err = httpx.HTTPStatusError("Service Unavailable", request=response.request, response=response)
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=err),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "network_error"

@@ -48,6 +48,8 @@ class BackfillSummary(BaseModel):
     no_match: int
     low_confidence: int
     rate_limited: int
+    auth_errors: int
+    network_errors: int
     errors: int
 
 
@@ -88,7 +90,8 @@ async def backfill() -> BackfillSummary:
     root = _ebooks_path()
     summary = {
         "total": 0, "enriched": 0, "skipped": 0, "no_match": 0,
-        "low_confidence": 0, "rate_limited": 0, "errors": 0,
+        "low_confidence": 0, "rate_limited": 0,
+        "auth_errors": 0, "network_errors": 0, "errors": 0,
     }
     tracker = _get_tracker()
     for path in sorted(root.rglob("*.epub")):
@@ -103,6 +106,8 @@ async def backfill() -> BackfillSummary:
             "no_match": "no_match",
             "low_confidence": "low_confidence",
             "rate_limited": "rate_limited",
+            "auth_error": "auth_errors",
+            "network_error": "network_errors",
             "error": "errors",
         }.get(result.status, "errors")
         summary[key] += 1

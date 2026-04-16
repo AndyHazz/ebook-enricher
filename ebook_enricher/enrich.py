@@ -59,8 +59,22 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
     except HardcoverAuthError as e:
         logger.warning("Hardcover auth error for %s: %s", path, e)
         return EnrichResult(status="auth_error", reason=str(e))
+    except httpx.HTTPStatusError as e:
+        # HTTP-level error from Hardcover. 401/403 = auth problem;
+        # 4xx/5xx otherwise = treat as network/service error.
+        if e.response.status_code in (401, 403):
+            logger.warning(
+                "Hardcover HTTP %d (auth) for %s: %s",
+                e.response.status_code, path, e,
+            )
+            return EnrichResult(status="auth_error", reason=str(e))
+        logger.warning(
+            "Hardcover HTTP %d for %s: %s",
+            e.response.status_code, path, e,
+        )
+        return EnrichResult(status="network_error", reason=str(e))
     except httpx.HTTPError as e:
-        # Connect refused, timeout, DNS failure, HTTP 5xx
+        # Connect refused, timeout, DNS failure
         logger.warning("Hardcover network error for %s: %s", path, e)
         return EnrichResult(status="network_error", reason=str(e))
     except Exception as e:

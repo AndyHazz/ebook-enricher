@@ -116,3 +116,35 @@ def test_enrich_records_to_tracker(client, tmp_path: Path, bare_epub: Path, monk
             assert resp.status_code == 200
     from ebook_enricher.status_epub import STATUS_FILENAME
     assert (tmp_path / STATUS_FILENAME).exists()
+
+
+def test_backfill_summary_splits_error_types(client, tmp_path: Path, bare_epub: Path, monkeypatch):
+    monkeypatch.setattr("ebook_enricher.server.BACKFILL_DELAY_S", 0)
+    books_dir = tmp_path / "books"
+    books_dir.mkdir()
+    import shutil
+    # Three files: auth error, network error, enriched
+    for i in range(3):
+        shutil.copy(bare_epub, books_dir / f"book{i}.epub")
+
+    monkeypatch.setenv("EBOOKS_PATH", str(books_dir))
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+
+    results = [
+        EnrichResult(status="auth_error", reason="not authorized"),
+        EnrichResult(status="network_error", reason="connection refused"),
+        EnrichResult(status="enriched"),
+    ]
+    with patch(
+        "ebook_enricher.server.enrich_file",
+        new=AsyncMock(side_effect=results),
+    ):
+        resp = client.post("/backfill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3
+    assert body["auth_errors"] == 1
+    assert body["network_errors"] == 1
+    assert body["enriched"] == 1
+    # Generic "errors" bucket should NOT have picked these up
+    assert body["errors"] == 0
