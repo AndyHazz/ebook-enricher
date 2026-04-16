@@ -44,7 +44,7 @@ qBit finishes download (tag = ebook)
    │ curl -X POST http://ebook-enricher:8000/enrich  -d {"path":"/data/media/ebooks/X.epub"}
    ▼
 ebook-enricher container
-   │ read EPUB → extract title/author (ebooklib)
+   │ read EPUB → extract title/author (stdlib zipfile + ElementTree)
    │ query Hardcover GraphQL
    │ fuzzy-match gate (rapidfuzz, ≥80% on title AND author)
    │ patch OPF metadata (series, description, subjects) — only empty fields
@@ -64,17 +64,17 @@ Single Python service organised into four focused modules:
 ```
 ebook_enricher/
 ├── server.py       # FastAPI: POST /enrich, POST /backfill, GET /health
-├── epub_meta.py    # read/write EPUB metadata (ebooklib wrapper)
+├── epub_meta.py    # read/write EPUB metadata (stdlib zipfile + ElementTree wrapper)
 ├── hardcover.py    # GraphQL client: search_book(title, author)
 ├── matcher.py      # fuzzy-match gate (pure functions)
 └── enrich.py       # orchestrator
 ```
 
-Each module has one external dependency (ebooklib, httpx, rapidfuzz) or none. `enrich.py` is the only place that knows about all of them.
+Each module has at most one external dependency (httpx, rapidfuzz) or none (`epub_meta` uses stdlib, `matcher` uses only rapidfuzz). `enrich.py` is the only place that knows about all of them.
 
 ### Module responsibilities
 
-**`epub_meta.py`** — thin wrapper over ebooklib.
+**`epub_meta.py`** — thin wrapper over stdlib zipfile + ElementTree.
 - `read_meta(path) -> EpubMeta` returns title, author, existing series, description, subjects.
 - `write_meta(path, updates) -> None` patches only fields present in `updates`, using Calibre's `calibre:series` / `calibre:series_index` convention (KOReader reads these).
 
