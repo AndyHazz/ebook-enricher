@@ -84,6 +84,15 @@ def _extract_genres(cached_tags: Optional[dict]) -> list[str]:
     return names
 
 
+def _format_position(pos) -> Optional[str]:
+    """Format a series position like Calibre: '1' for integers, '1.5' for decimals."""
+    if pos is None:
+        return None
+    if isinstance(pos, float) and pos.is_integer():
+        return str(int(pos))
+    return str(pos)
+
+
 def _pick_series(book_series: list[dict]) -> tuple[Optional[str], Optional[str]]:
     if not book_series:
         return None, None
@@ -91,7 +100,7 @@ def _pick_series(book_series: list[dict]) -> tuple[Optional[str], Optional[str]]
     chosen = featured or book_series[0]
     name = (chosen.get("series") or {}).get("name")
     pos = chosen.get("position")
-    return name, (str(pos) if pos is not None else None)
+    return name, _format_position(pos)
 
 
 def _first_author(contributions: list[dict]) -> str:
@@ -100,11 +109,18 @@ def _first_author(contributions: list[dict]) -> str:
     return (contributions[0].get("author") or {}).get("name") or ""
 
 
-def _parse_book(raw: dict) -> HardcoverBook:
+def _parse_book(raw: dict) -> Optional[HardcoverBook]:
+    # Hardcover is in beta — schema can be unstable. Skip entries missing
+    # required fields rather than crashing the whole query.
+    book_id = raw.get("id")
+    title = raw.get("title")
+    if book_id is None or not title:
+        logger.warning("Skipping malformed Hardcover entry: id=%r title=%r", book_id, title)
+        return None
     series_name, series_pos = _pick_series(raw.get("book_series") or [])
     return HardcoverBook(
-        id=raw["id"],
-        title=raw["title"],
+        id=book_id,
+        title=title,
         author=_first_author(raw.get("contributions") or []),
         description=raw.get("description"),
         series_name=series_name,
@@ -138,6 +154,9 @@ async def search_book(title: str, author: str, token: str) -> list[HardcoverBook
                 raise RateLimitedError("Hardcover returned 429 twice")
             resp.raise_for_status()
             payload = resp.json()
+            if payload.get("errors"):
+                raise RuntimeError(f"Hardcover GraphQL errors: {payload['errors']}")
             books = (payload.get("data") or {}).get("books") or []
-            return [_parse_book(b) for b in books]
+            parsed = [_parse_book(b) for b in books]
+            return [p for p in parsed if p is not None]
     return []

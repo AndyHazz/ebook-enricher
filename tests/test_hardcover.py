@@ -52,7 +52,7 @@ async def test_successful_search():
     assert book.title == "All the Skills"
     assert book.author == "Honour Rae"
     assert book.series_name == "All the Skills"
-    assert book.series_position == "1.0"
+    assert book.series_position == "1"
     assert "LitRPG" in book.genres
     assert book.description.startswith("A deckbuilding")
 
@@ -151,3 +151,110 @@ async def test_no_series_returns_none():
     results = await search_book("Standalone", "A", token="fake")
     assert results[0].series_name is None
     assert results[0].series_position is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_graphql_errors_raise():
+    error_payload = {
+        "errors": [{"message": "Not authorized"}],
+        "data": None,
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=error_payload)
+    )
+    with pytest.raises(RuntimeError, match="Hardcover GraphQL errors"):
+        await search_book("Any", "Any", token="fake")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_malformed_entry_is_skipped():
+    # Second entry is missing `id` — must be dropped, but first is returned.
+    payload = {
+        "data": {
+            "books": [
+                {
+                    "id": 1,
+                    "title": "Good Book",
+                    "description": None,
+                    "cached_tags": {},
+                    "book_series": [],
+                    "contributions": [{"author": {"name": "Author"}}],
+                },
+                {
+                    # No id, no title — malformed
+                    "description": "bad",
+                    "cached_tags": {},
+                    "book_series": [],
+                    "contributions": [],
+                },
+            ]
+        }
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    results = await search_book("Good", "Author", token="fake")
+    assert len(results) == 1
+    assert results[0].title == "Good Book"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_integer_series_position_formatted_without_decimal():
+    payload = {
+        "data": {
+            "books": [
+                {
+                    "id": 5,
+                    "title": "Book 1",
+                    "description": None,
+                    "cached_tags": {},
+                    "book_series": [
+                        {
+                            "position": 1.0,
+                            "featured": True,
+                            "series": {"name": "The Series"},
+                        }
+                    ],
+                    "contributions": [{"author": {"name": "A"}}],
+                }
+            ]
+        }
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    results = await search_book("Book 1", "A", token="fake")
+    assert results[0].series_position == "1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fractional_series_position_preserved():
+    payload = {
+        "data": {
+            "books": [
+                {
+                    "id": 6,
+                    "title": "Novella",
+                    "description": None,
+                    "cached_tags": {},
+                    "book_series": [
+                        {
+                            "position": 1.5,
+                            "featured": True,
+                            "series": {"name": "The Series"},
+                        }
+                    ],
+                    "contributions": [{"author": {"name": "A"}}],
+                }
+            ]
+        }
+    }
+    respx.post(HARDCOVER_URL).mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    results = await search_book("Novella", "A", token="fake")
+    assert results[0].series_position == "1.5"
