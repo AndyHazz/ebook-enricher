@@ -8,6 +8,15 @@ from ebook_enricher.enrich import EnrichResult
 from ebook_enricher.server import app
 
 
+@pytest.fixture(autouse=True)
+def _reset_tracker():
+    # Each test starts with a clean tracker
+    import ebook_enricher.server as srv
+    srv._tracker = None
+    yield
+    srv._tracker = None
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
@@ -68,3 +77,42 @@ def test_backfill_iterates_folder(client, tmp_path: Path, bare_epub: Path, monke
     assert body["total"] == 2
     assert body["enriched"] == 2
     assert mock.await_count == 2
+
+
+def test_backfill_skips_status_file(client, tmp_path: Path, bare_epub: Path, monkeypatch):
+    monkeypatch.setattr("ebook_enricher.server.BACKFILL_DELAY_S", 0)
+    books_dir = tmp_path / "books"
+    books_dir.mkdir()
+    import shutil
+    from ebook_enricher.status_epub import STATUS_FILENAME, write_status_epub
+    shutil.copy(bare_epub, books_dir / "one.epub")
+    # Drop a fake status file that backfill must NOT enrich
+    write_status_epub(books_dir, title="old status", body="body")
+
+    monkeypatch.setenv("EBOOKS_PATH", str(books_dir))
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+
+    with patch(
+        "ebook_enricher.server.enrich_file",
+        new=AsyncMock(return_value=EnrichResult(status="enriched")),
+    ) as mock:
+        resp = client.post("/backfill")
+    assert resp.status_code == 200
+    # Should have enriched exactly 1 (the status file was skipped)
+    assert mock.await_count == 1
+    assert resp.json()["total"] == 1
+
+
+def test_enrich_records_to_tracker(client, tmp_path: Path, bare_epub: Path, monkeypatch):
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+    monkeypatch.setenv("EBOOKS_PATH", str(tmp_path))
+    # Simulate 3 consecutive auth errors -> status EPUB appears
+    with patch(
+        "ebook_enricher.server.enrich_file",
+        new=AsyncMock(return_value=EnrichResult(status="auth_error", reason="Not authorized")),
+    ):
+        for _ in range(3):
+            resp = client.post("/enrich", json={"path": str(bare_epub)})
+            assert resp.status_code == 200
+    from ebook_enricher.status_epub import STATUS_FILENAME
+    assert (tmp_path / STATUS_FILENAME).exists()

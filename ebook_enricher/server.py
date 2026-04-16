@@ -17,6 +17,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from ebook_enricher.enrich import EnrichResult, enrich_file
+from ebook_enricher.status_epub import STATUS_FILENAME
+from ebook_enricher.status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -24,6 +26,15 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 app = FastAPI(title="ebook-enricher")
 
 BACKFILL_DELAY_S = 1.0
+
+_tracker: StatusTracker | None = None
+
+
+def _get_tracker() -> StatusTracker:
+    global _tracker
+    if _tracker is None:
+        _tracker = StatusTracker(_ebooks_path())
+    return _tracker
 
 
 class EnrichRequest(BaseModel):
@@ -67,6 +78,7 @@ def health() -> dict:
 async def enrich(req: EnrichRequest) -> dict:
     token = _token()
     result = await enrich_file(Path(req.path), token=token)
+    _get_tracker().record(result)
     return _result_to_dict(result)
 
 
@@ -78,9 +90,13 @@ async def backfill() -> BackfillSummary:
         "total": 0, "enriched": 0, "skipped": 0, "no_match": 0,
         "low_confidence": 0, "rate_limited": 0, "errors": 0,
     }
+    tracker = _get_tracker()
     for path in sorted(root.rglob("*.epub")):
+        if path.name == STATUS_FILENAME:
+            continue  # Don't try to enrich our own status file
         summary["total"] += 1
         result = await enrich_file(path, token=token)
+        tracker.record(result)
         key = {
             "enriched": "enriched",
             "skipped": "skipped",
