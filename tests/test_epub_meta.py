@@ -95,3 +95,23 @@ def test_write_updates_existing_property_style(modern_epub: Path):
         or m.attrib.get("property") == "calibre:series"
     ]
     assert len(series_metas) == 1, f"Expected 1 series meta, got {len(series_metas)}"
+
+
+def test_write_preserves_file_mode(bare_epub: Path, tmp_path: Path):
+    # Simulate the Pi permissions: user-owned, group-readable (664).
+    import os
+    import stat
+    os.chmod(bare_epub, 0o664)
+    write_meta(
+        bare_epub,
+        EpubMeta(
+            title="",
+            author="",
+            series="A Series",
+            series_index="1",
+        ),
+    )
+    # After the atomic rename, the file's mode must still be 664.
+    # Without preservation, tempfile.mkstemp's 0600 would leak through.
+    mode = stat.S_IMODE(bare_epub.stat().st_mode)
+    assert mode == 0o664, f"Expected 0o664, got {oct(mode)}"

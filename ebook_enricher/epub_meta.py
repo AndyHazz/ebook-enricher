@@ -159,7 +159,11 @@ def write_meta(path: Path, meta: EpubMeta) -> None:
 
     new_opf_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    # Rewrite the zip with the modified OPF and the rest copied verbatim
+    # Rewrite the zip with the modified OPF and the rest copied verbatim.
+    # Capture original ownership+mode before writing so we can restore them
+    # after the rename — tempfile.mkstemp defaults to 0600/root:root, which
+    # would lock out Syncthing and other consumers from reading the file.
+    orig_stat = path.stat()
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub", dir=path.parent)
     os.close(tmp_fd)
     try:
@@ -174,6 +178,14 @@ def write_meta(path: Path, meta: EpubMeta) -> None:
                                  compress_type=zipfile.ZIP_STORED)
                 else:
                     dst.writestr(item, src.read(item.filename))
+        # Restore permissions and ownership before the atomic rename.
+        os.chmod(tmp_path, orig_stat.st_mode & 0o7777)
+        try:
+            os.chown(tmp_path, orig_stat.st_uid, orig_stat.st_gid)
+        except PermissionError:
+            # Non-root caller can't chown; mode alone is usually enough
+            # because the file is created by the same user that owns path.
+            pass
         shutil.move(tmp_path, path)
     except Exception:
         Path(tmp_path).unlink(missing_ok=True)
