@@ -36,3 +36,32 @@ def test_minor_punctuation_passes():
         "Sea of Tranquility: A novel", "Emily St. John Mandel",
         "Sea of Tranquility", "Emily St. John Mandel",
     ) is True
+
+
+def test_different_title_same_author_fails():
+    # Title gate must reject a clearly different book by the same author.
+    assert is_confident_match(
+        "Dungeon Crawler Carl", "Matt Dinniman",
+        "Carl's Really Different Adventure", "Matt Dinniman",
+    ) is False
+
+
+def test_empty_epub_author_fails():
+    # An EPUB missing dc:creator must never match, even with a perfect title.
+    assert is_confident_match(
+        "Dungeon Crawler Carl", "",
+        "Dungeon Crawler Carl", "Matt Dinniman",
+    ) is False
+
+
+def test_empty_hc_author_fails():
+    # A Hardcover result with no contributions must never match.
+    assert is_confident_match(
+        "Dungeon Crawler Carl", "Matt Dinniman",
+        "Dungeon Crawler Carl", "",
+    ) is False
+
+
+def test_empty_everything_fails():
+    # All four empty: the worst-case degenerate input must not return True.
+    assert is_confident_match("", "", "", "") is False
