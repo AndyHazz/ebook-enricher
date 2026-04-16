@@ -15,11 +15,19 @@ from pathlib import Path
 from typing import Literal, Optional
 
 Status = Literal[
-    "enriched", "skipped", "no_match", "low_confidence", "rate_limited", "error"
+    "enriched", "skipped", "no_match", "low_confidence",
+    "rate_limited", "auth_error", "network_error", "error",
 ]
 
+import httpx
+
 from ebook_enricher.epub_meta import EpubMeta, read_meta, write_meta
-from ebook_enricher.hardcover import HardcoverBook, RateLimitedError, search_book
+from ebook_enricher.hardcover import (
+    HardcoverAuthError,
+    HardcoverBook,
+    RateLimitedError,
+    search_book,
+)
 from ebook_enricher.matcher import is_confident_match
 
 logger = logging.getLogger(__name__)
@@ -48,6 +56,13 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         candidates = await search_book(meta.title, meta.author, token=token)
     except RateLimitedError:
         return EnrichResult(status="rate_limited")
+    except HardcoverAuthError as e:
+        logger.warning("Hardcover auth error for %s: %s", path, e)
+        return EnrichResult(status="auth_error", reason=str(e))
+    except httpx.HTTPError as e:
+        # Connect refused, timeout, DNS failure, HTTP 5xx
+        logger.warning("Hardcover network error for %s: %s", path, e)
+        return EnrichResult(status="network_error", reason=str(e))
     except Exception as e:
         logger.exception("Hardcover query failed for %s", path)
         return EnrichResult(status="error", reason=f"hardcover_error: {e}")

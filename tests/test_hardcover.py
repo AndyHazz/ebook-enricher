@@ -163,7 +163,8 @@ async def test_graphql_errors_raise():
     respx.post(HARDCOVER_URL).mock(
         return_value=httpx.Response(200, json=error_payload)
     )
-    with pytest.raises(RuntimeError, match="Hardcover GraphQL errors"):
+    from ebook_enricher.hardcover import HardcoverAuthError
+    with pytest.raises(HardcoverAuthError, match="Hardcover GraphQL errors"):
         await search_book("Any", "Any", token="fake")
 
 

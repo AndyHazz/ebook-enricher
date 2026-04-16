@@ -28,6 +28,16 @@ class RateLimitedError(Exception):
     """Raised when Hardcover returns 429 after a retry."""
 
 
+class HardcoverAuthError(Exception):
+    """Raised when Hardcover returns a GraphQL errors array.
+
+    This is usually an authentication problem (expired token) but can
+    also indicate a malformed query or a schema change. The caller
+    should treat it as an actionable error — enrichment cannot proceed
+    until the credential or query is fixed.
+    """
+
+
 @dataclass
 class HardcoverBook:
     id: int
@@ -155,7 +165,7 @@ async def search_book(title: str, author: str, token: str) -> list[HardcoverBook
             resp.raise_for_status()
             payload = resp.json()
             if payload.get("errors"):
-                raise RuntimeError(f"Hardcover GraphQL errors: {payload['errors']}")
+                raise HardcoverAuthError(f"Hardcover GraphQL errors: {payload['errors']}")
             books = (payload.get("data") or {}).get("books") or []
             parsed = [_parse_book(b) for b in books]
             return [p for p in parsed if p is not None]

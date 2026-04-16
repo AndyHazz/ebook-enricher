@@ -122,6 +122,33 @@ async def test_write_failure_reported_as_error(bare_epub: Path):
 
 
 @pytest.mark.asyncio
+async def test_auth_error_status(bare_epub: Path):
+    from ebook_enricher.hardcover import HardcoverAuthError
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=HardcoverAuthError("Hardcover GraphQL errors: [{'message': 'Not authorized'}]")),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "auth_error"
+    assert "Not authorized" in (result.reason or "")
+    # EPUB untouched
+    meta = read_meta(bare_epub)
+    assert meta.series is None
+
+
+@pytest.mark.asyncio
+async def test_network_error_status(bare_epub: Path):
+    import httpx
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(side_effect=httpx.ConnectError("connection refused")),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "network_error"
+    assert "connection refused" in (result.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_preserves_existing_description_when_enriching_series(
     bare_epub: Path, tmp_path: Path
 ):
