@@ -1,0 +1,23 @@
+services:
+  ebook-enricher:
+    build: .
+    image: ebook-enricher:latest
+    container_name: ebook-enricher
+    restart: unless-stopped
+    environment:
+      - HARDCOVER_TOKEN=${HARDCOVER_TOKEN}
+      - EBOOKS_PATH=/data/media/ebooks
+      - LOG_LEVEL=INFO
+    volumes:
+      - /mnt/data/media/ebooks:/data/media/ebooks
+    networks:
+      - plexypi_default
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  plexypi_default:
+    external: true
