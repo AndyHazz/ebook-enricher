@@ -2,6 +2,9 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
+# Runtime dep for rapidfuzz C++ extension — must persist after build deps are removed
+RUN apk add --no-cache libstdc++
+
 # Build deps for rapidfuzz C extension; removed after install
 RUN apk add --no-cache --virtual .build-deps gcc g++ musl-dev
 

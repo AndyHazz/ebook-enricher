@@ -13,7 +13,7 @@ docker compose up -d
 ## Backfill all existing books
 
 ```
-docker exec ebook-enricher curl -sS -X POST http://localhost:8000/backfill
+docker exec ebook-enricher curl -sS -X POST --max-time 1200 http://localhost:8000/backfill
 ```
 
 ## API
