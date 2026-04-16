@@ -244,3 +244,31 @@ async def test_http_503_classified_as_network_error(bare_epub: Path):
     ):
         result = await enrich_file(bare_epub, token="fake")
     assert result.status == "network_error"
+
+
+@pytest.mark.asyncio
+async def test_picks_best_candidate_not_first(bare_epub: Path):
+    """When multiple candidates pass the confidence gate, pick the one
+    with the highest combined (title + author) score, not the first."""
+    # EPUB title is "Test Book Title"
+    broader = _make_hc_book(
+        title="Test Book Title Box Set: Three Books Collection",
+        author="Test Author",
+    )
+    exact = _make_hc_book(
+        title="Test Book Title",
+        author="Test Author",
+        series_name="Proper Series",
+        series_position="1",
+    )
+    with patch(
+        "ebook_enricher.enrich.search_book",
+        new=AsyncMock(return_value=[broader, exact]),
+    ):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "enriched"
+    # The `exact` candidate had "Proper Series" — if we wrongly picked
+    # `broader` we'd have lost this metadata (or more likely, inherited
+    # generic box-set metadata).
+    meta = read_meta(bare_epub)
+    assert meta.series == "Proper Series"

@@ -28,7 +28,11 @@ from ebook_enricher.hardcover import (
     RateLimitedError,
     search_book,
 )
-from ebook_enricher.matcher import is_confident_match
+from ebook_enricher.matcher import (
+    AUTHOR_THRESHOLD,
+    TITLE_THRESHOLD,
+    score_match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +88,26 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
     if not candidates:
         return EnrichResult(status="no_match")
 
+    # Score every candidate and pick the best — not the first passing one.
+    # Hardcover's search can return broader matches (box sets, omnibus
+    # editions) before the specific book, so first-passing lost information.
+    # When scores tie, prefer the candidate whose title length is closest
+    # to the EPUB's title length — a shorter HC title is usually more
+    # specific (the standalone book) than a longer one (the box set).
     chosen: Optional[HardcoverBook] = None
+    best_key: tuple[int, int] = (-1, -(1 << 30))
     for candidate in candidates:
-        if is_confident_match(meta.title, meta.author, candidate.title, candidate.author):
+        t_score, a_score = score_match(
+            meta.title, meta.author, candidate.title, candidate.author
+        )
+        if t_score < TITLE_THRESHOLD or a_score < AUTHOR_THRESHOLD:
+            continue
+        total = t_score + a_score
+        length_penalty = -abs(len(meta.title) - len(candidate.title))
+        key = (total, length_penalty)
+        if key > best_key:
             chosen = candidate
-            break
+            best_key = key
 
     if chosen is None:
         return EnrichResult(status="low_confidence")

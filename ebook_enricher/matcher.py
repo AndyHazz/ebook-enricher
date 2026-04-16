@@ -21,23 +21,23 @@ TITLE_THRESHOLD = 80
 AUTHOR_THRESHOLD = 80
 
 
-def is_confident_match(
+def _has_content(s: str) -> bool:
+    return bool(s and s.strip())
+
+
+def score_match(
     epub_title: str,
     epub_author: str,
     hc_title: str,
     hc_author: str,
-) -> bool:
-    # Empty fields on either side are always a hard miss — partial_ratio('', '')
-    # returns 100 and would otherwise produce silent false accepts.
-    if not (epub_title and epub_title.strip()):
-        return False
-    if not (epub_author and epub_author.strip()):
-        return False
-    if not (hc_title and hc_title.strip()):
-        return False
-    if not (hc_author and hc_author.strip()):
-        return False
+) -> tuple[int, int]:
+    """Return (title_score, author_score) 0-100. Empty inputs score 0.
 
+    Used both to gate a single candidate and to rank multiple candidates
+    so we can pick the best match rather than the first acceptable one.
+    """
+    if not all(_has_content(s) for s in (epub_title, epub_author, hc_title, hc_author)):
+        return 0, 0
     title_score = max(
         fuzz.token_set_ratio(epub_title.lower(), hc_title.lower()),
         fuzz.partial_ratio(epub_title.lower(), hc_title.lower()),
@@ -46,4 +46,14 @@ def is_confident_match(
         fuzz.token_set_ratio(epub_author.lower(), hc_author.lower()),
         fuzz.partial_ratio(epub_author.lower(), hc_author.lower()),
     )
+    return title_score, author_score
+
+
+def is_confident_match(
+    epub_title: str,
+    epub_author: str,
+    hc_title: str,
+    hc_author: str,
+) -> bool:
+    title_score, author_score = score_match(epub_title, epub_author, hc_title, hc_author)
     return title_score >= TITLE_THRESHOLD and author_score >= AUTHOR_THRESHOLD
