@@ -1,0 +1,70 @@
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ebook_enricher.enrich import EnrichResult
+from ebook_enricher.server import app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def test_health(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_enrich_calls_enrich_file(client, bare_epub: Path, monkeypatch):
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+    with patch(
+        "ebook_enricher.server.enrich_file",
+        new=AsyncMock(return_value=EnrichResult(status="enriched", series="Test")),
+    ) as mock:
+        resp = client.post("/enrich", json={"path": str(bare_epub)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "enriched"
+    assert body["series"] == "Test"
+    mock.assert_awaited_once()
+
+
+def test_enrich_missing_path(client, monkeypatch):
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+    resp = client.post("/enrich", json={})
+    assert resp.status_code == 422  # Pydantic validation error
+
+
+def test_enrich_without_token_returns_error(client, monkeypatch, bare_epub: Path):
+    monkeypatch.delenv("HARDCOVER_TOKEN", raising=False)
+    resp = client.post("/enrich", json={"path": str(bare_epub)})
+    assert resp.status_code == 500
+    assert "HARDCOVER_TOKEN" in resp.json()["detail"]
+
+
+def test_backfill_iterates_folder(client, tmp_path: Path, bare_epub: Path, monkeypatch):
+    monkeypatch.setattr("ebook_enricher.server.BACKFILL_DELAY_S", 0)
+    # Copy the bare_epub into a sub-folder the backfill will walk
+    books_dir = tmp_path / "books"
+    books_dir.mkdir()
+    import shutil
+    shutil.copy(bare_epub, books_dir / "one.epub")
+    shutil.copy(bare_epub, books_dir / "two.epub")
+
+    monkeypatch.setenv("EBOOKS_PATH", str(books_dir))
+    monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
+
+    with patch(
+        "ebook_enricher.server.enrich_file",
+        new=AsyncMock(return_value=EnrichResult(status="enriched")),
+    ) as mock:
+        resp = client.post("/backfill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert body["enriched"] == 2
+    assert mock.await_count == 2
