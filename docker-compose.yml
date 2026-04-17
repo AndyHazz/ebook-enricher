@@ -9,9 +9,8 @@ services:
       - EBOOKS_PATH=/data/media/ebooks
       - LOG_LEVEL=INFO
     volumes:
-      - /mnt/data/media/ebooks:/data/media/ebooks
-    networks:
-      - plexypi_default
+      # Adjust source path to wherever your EPUB library lives on the host.
+      - ./ebooks:/data/media/ebooks
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -19,6 +18,11 @@ services:
       retries: 3
       start_period: 15s
 
-networks:
-  plexypi_default:
-    external: true
+# To attach to an existing Docker network so siblings can reach
+# `http://ebook-enricher:8000`, uncomment and set the network name:
+#
+#   networks:
+#     my_stack_default:
+#       external: true
+#
+# Then add `networks: [my_stack_default]` to the service.

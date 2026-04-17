@@ -1,8 +1,8 @@
 # ebook-enricher
 
-Small HTTP service that enriches EPUB metadata (series name + position, description, genres) using the [Hardcover](https://hardcover.app) GraphQL API. Designed to sit next to qBittorrent as a Docker sidecar: every time a new ebook finishes downloading, qBit's autorun script copies it into a Syncthing-backed folder and pings this service, which looks up the book on Hardcover and patches the EPUB in place. Syncthing then carries the enriched file to whatever reader you use.
+Small HTTP service that enriches EPUB metadata (series name + position, description, genres) using the [Hardcover](https://hardcover.app) GraphQL API. POST a path to an EPUB at the `/enrich` endpoint; it looks the book up on Hardcover and patches the file in place.
 
-Built for a specific pipeline — qBittorrent → Syncthing folder → Kindle / KOReader — but the service itself is generic: give it a path to an EPUB and an environment variable, it updates the file.
+Runs as a Docker container. The typical use case is wiring it into whatever pipeline puts EPUBs into your library — a file watcher, a Syncthing receive-only folder with an on-change hook, a cron job, or a manual `curl` for one-off enrichment.
 
 ## What it writes, what it doesn't
 
@@ -30,18 +30,18 @@ A wrong-metadata outcome is worse than no-metadata — if no candidate clears th
 Requires Docker + docker compose, a `HARDCOVER_TOKEN` from your Hardcover account settings, and a bind mount to the ebook folder you want enriched.
 
 ```bash
-git clone https://github.com/AndyHazz/ebook-enricher.git /opt/stacks/ebook-enricher
-cd /opt/stacks/ebook-enricher
+git clone https://github.com/AndyHazz/ebook-enricher.git
+cd ebook-enricher
 echo "HARDCOVER_TOKEN=eyJhbGci..." > .env
 chmod 600 .env
 docker compose up -d --build
 ```
 
-The default `docker-compose.yml` expects `/mnt/data/media/ebooks` to exist on the host (my layout). Adjust the `volumes:` entry to match yours.
+Edit the `volumes:` entry in `docker-compose.yml` to bind-mount your EPUB folder. The default (`./ebooks:/data/media/ebooks`) works if you drop books into an `ebooks/` subdirectory next to the compose file.
 
 ### Network topology
 
-The service listens on `8000/tcp` inside its container. It does **not** expose a host port by default — it's intended to be reached from a sibling container (qBittorrent, Sonarr, a custom hook) over the Docker network. If you use a different compose project, edit the `networks:` block in `docker-compose.yml`:
+The service listens on `8000/tcp` inside its container. It does **not** expose a host port by default — it's intended to be reached from a sibling container or a process on the host Docker network. Attach it to an existing Docker network by editing the `networks:` block in `docker-compose.yml`:
 
 ```yaml
 networks:
@@ -82,23 +82,26 @@ Possible statuses:
  "auth_errors": 0, "network_errors": 0, "errors": 0}
 ```
 
-## Hooking it into qBittorrent
+## Triggering enrichment
 
-Set qBit's "Run external program on torrent completion" to a small shell script that copies the downloaded ebook into your sync folder and then `curl`s this service. A working example lives in `examples/process-ebook.sh`:
+You can fire `/enrich` from anywhere that can reach the service over HTTP. Examples:
 
 ```bash
-#!/bin/bash
-# qBittorrent autorun. Called with: %G (tags) %D (save path) %F (content path) %N (name)
-TAGS="$1"; SAVE_PATH="$2"; CONTENT_PATH="$3"; NAME="$4"
-
-case "$TAGS" in *ebook*) ;; *) exit 0 ;; esac
-# ... copy to sync folder ...
-curl -sf -m 30 -X POST http://ebook-enricher:8000/enrich \
+# One-off: enrich a single file
+curl -sS -X POST http://ebook-enricher:8000/enrich \
     -H 'Content-Type: application/json' \
-    -d "{\"path\":\"/data/media/ebooks/${NAME}.epub\"}" > /dev/null 2>&1 || true
+    -d '{"path":"/data/media/ebooks/Example Book.epub"}'
+
+# On-change hook (inotifywait):
+inotifywait -m -e close_write --format '%w%f' /data/media/ebooks/ | while read f; do
+    case "$f" in *.epub)
+        curl -sf -X POST http://ebook-enricher:8000/enrich \
+            -H 'Content-Type: application/json' -d "{\"path\":\"$f\"}" || true
+    esac
+done
 ```
 
-Key detail: use `cp`, not `ln`. Hardlinks share an inode with the seeding copy, so editing the enriched copy's metadata would corrupt the torrent.
+One important caveat: **the file `/enrich` operates on must be a standalone copy, not a hardlink to any source you care about**. The service rewrites the EPUB in place, which changes its content hash. If the file shares an inode with a source of truth (e.g. a library master), the original will be mutated along with the enriched copy. Always enrich a dedicated copy.
 
 ## User-visible error surfacing (the "status EPUB")
 
