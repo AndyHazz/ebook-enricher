@@ -127,7 +127,7 @@ Flow:
    d. **Safety assertion**: `dest_path != keeper` AND `keeper` is under `save_path` (would otherwise mean trying to write back to the seed — refuse).
    e. Generate a staging path: `sync_base / staging_subdir / (uuid4().hex + keeper.suffix)`.
    f. `shutil.copy2(keeper, staging_path)` — preserves mtime, never touches `keeper`.
-   g. If `keeper.suffix.lower() == ".epub"`: `httpx.post(enricher_url, json={"path": str(staging_path)}, timeout=30)`. Log non-200 and proceed (matches current "enrich failure doesn't block copy" behaviour).
+   g. If `keeper.suffix.lower() == ".epub"`: POST `{"path": str(staging_path)}` to `enricher_url` via stdlib `urllib.request.urlopen` with a 30s timeout (httpx is not installed in the qBit container, and a single JSON POST doesn't justify adding it). Log non-200 and proceed (matches current "enrich failure doesn't block copy" behaviour).
    h. `os.makedirs(dest_path.parent, exist_ok=True)`; `os.replace(staging_path, dest_path)` — atomic rename within same filesystem.
 4. **For each passthrough file (cover.jpg, .opf, etc.):**
    - `dest_path = sync_base / src.relative_to(save_path)`.
