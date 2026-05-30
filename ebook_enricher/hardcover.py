@@ -50,6 +50,9 @@ class HardcoverBook:
     series_name: Optional[str]
     series_position: Optional[str]
     genres: list[str]
+    image_url: Optional[str] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
 
 
 QUERY = """
@@ -133,6 +136,7 @@ def _parse_hit(hit: dict) -> Optional[HardcoverBook]:
         logger.warning("Skipping malformed Hardcover hit: id=%r title=%r", book_id, title)
         return None
     series_name, series_pos = _pick_series(doc)
+    image = doc.get("image") or {}
     return HardcoverBook(
         id=str(book_id),
         title=title,
@@ -141,6 +145,9 @@ def _parse_hit(hit: dict) -> Optional[HardcoverBook]:
         series_name=series_name,
         series_position=series_pos,
         genres=_extract_genres(doc),
+        image_url=image.get("url"),
+        image_width=image.get("width"),
+        image_height=image.get("height"),
     )
 
 

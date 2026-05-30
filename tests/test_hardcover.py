@@ -211,3 +211,44 @@ async def test_author_falls_back_to_author_names():
     )
     results = await search_book("x", "y", token="fake")
     assert results[0].author == "Only In Names"
+
+
+def test_parse_hit_extracts_image_fields():
+    """A hit with an `image` block populates image_url/width/height."""
+    from ebook_enricher.hardcover import _parse_hit
+
+    hit = {
+        "document": {
+            "id": 42,
+            "title": "Test Book",
+            "author_names": ["Test Author"],
+            "image": {
+                "url": "https://assets.hardcover.app/edition/1/abc.jpg",
+                "width": 1463,
+                "height": 2401,
+            },
+        }
+    }
+    book = _parse_hit(hit)
+    assert book is not None
+    assert book.image_url == "https://assets.hardcover.app/edition/1/abc.jpg"
+    assert book.image_width == 1463
+    assert book.image_height == 2401
+
+
+def test_parse_hit_no_image_block():
+    """A hit without an `image` block leaves image fields as None."""
+    from ebook_enricher.hardcover import _parse_hit
+
+    hit = {
+        "document": {
+            "id": 42,
+            "title": "Test Book",
+            "author_names": ["Test Author"],
+        }
+    }
+    book = _parse_hit(hit)
+    assert book is not None
+    assert book.image_url is None
+    assert book.image_width is None
+    assert book.image_height is None
