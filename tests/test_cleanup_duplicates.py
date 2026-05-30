@@ -85,3 +85,75 @@ def test_dry_run_works_with_allow_root_override(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "Ready Player One.mobi" in result.stdout
+
+
+def test_commit_deletes_losers_keeps_keepers(tmp_path):
+    root = _make_library(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), str(root),
+            "--commit", "--allow-root", str(tmp_path),
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Keepers
+    assert (root / "Ready Player One.epub").exists()
+    assert (root / "Snow Crash.mobi").exists()
+    # Solo group untouched
+    assert (root / "Solo Book.epub").exists()
+    # Non-ebook files untouched
+    assert (root / "Ready Player One.jpg").exists()
+    assert (root / "Solo Book.opf").exists()
+
+    # Losers gone
+    assert not (root / "Ready Player One.mobi").exists()
+    assert not (root / "Ready Player One.pdf").exists()
+    assert not (root / "Snow Crash.pdf").exists()
+
+
+def test_commit_is_idempotent(tmp_path):
+    """Running --commit twice in a row is fine; second run finds nothing."""
+    root = _make_library(tmp_path)
+    subprocess.run(
+        [sys.executable, str(SCRIPT), str(root), "--commit",
+         "--allow-root", str(tmp_path)],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(root), "--commit",
+         "--allow-root", str(tmp_path)],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 0
+    assert "Summary: 0 duplicate groups" in result.stdout
+
+
+def test_symlink_escape_blocked(tmp_path):
+    """A symlink inside the safe root pointing outside must not be
+    followed for deletion."""
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = outside / "Important.epub"
+    real.write_bytes(b"do-not-delete")
+    link = safe / "Important.epub"
+    link.symlink_to(real)
+    # also need a duplicate to trigger a group with >1
+    (safe / "Important.pdf").write_bytes(b"dup")
+
+    # The script resolves paths; the resolved symlink points outside
+    # safe, so the assertion in main() will fail.
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(safe),
+         "--commit", "--allow-root", str(safe)],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    # Non-zero exit OR clean refusal — either way the real file must survive
+    assert real.exists(), "symlink target outside safe root must not be deleted"
