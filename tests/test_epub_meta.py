@@ -115,3 +115,36 @@ def test_write_preserves_file_mode(bare_epub: Path, tmp_path: Path):
     # Without preservation, tempfile.mkstemp's 0600 would leak through.
     mode = stat.S_IMODE(bare_epub.stat().st_mode)
     assert mode == 0o664, f"Expected 0o664, got {oct(mode)}"
+
+
+def test_write_meta_with_cover_override_replaces_cover_bytes(epub_with_cover):
+    """cover_override=(zip_path, new_bytes) replaces that file's bytes
+    in the EPUB during the single-pass rewrite."""
+    from ebook_enricher.epub_meta import read_meta, write_meta
+    import zipfile
+
+    meta = read_meta(epub_with_cover)
+    # Add a series so write_meta has something to update — its behaviour
+    # for cover_override is what we're testing, not the metadata bits.
+    meta.series = "Test Series"
+    new_cover = b"NEW_COVER_BYTES" + b"x" * 70_000
+    write_meta(
+        epub_with_cover,
+        meta,
+        cover_override=("OEBPS/images/cover.jpg", new_cover),
+    )
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        assert zf.read("OEBPS/images/cover.jpg") == new_cover
+
+
+def test_write_meta_without_cover_override_leaves_cover(epub_with_cover):
+    """When cover_override is None (default), the existing cover is untouched."""
+    from ebook_enricher.epub_meta import read_meta, write_meta
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    import zipfile
+
+    meta = read_meta(epub_with_cover)
+    meta.series = "Test Series"
+    write_meta(epub_with_cover, meta)  # no cover_override
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL

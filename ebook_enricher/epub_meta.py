@@ -128,12 +128,20 @@ def _set_or_add_dc(metadata: ET.Element, tag: str, text: str) -> None:
     el.text = text
 
 
-def write_meta(path: Path, meta: EpubMeta) -> None:
+def write_meta(
+    path: Path,
+    meta: EpubMeta,
+    cover_override: Optional[tuple[str, bytes]] = None,
+) -> None:
     """Write series, series_index, description, and subjects into the EPUB.
 
     Title and author are NEVER overwritten — the values on `meta` for
     those fields are ignored. Only the enrichment-owned fields are
     updated.
+
+    If `cover_override=(zip_path, bytes)` is provided, the zip member at
+    that path is also replaced with the given bytes during the same
+    single-pass rewrite — keeping the operation atomic.
     """
     with zipfile.ZipFile(path) as zf:
         opf_path = _find_opf_path(zf)
@@ -172,6 +180,8 @@ def write_meta(path: Path, meta: EpubMeta) -> None:
             for item in src.infolist():
                 if item.filename == opf_path:
                     dst.writestr(item, new_opf_bytes)
+                elif cover_override is not None and item.filename == cover_override[0]:
+                    dst.writestr(item, cover_override[1])
                 elif item.filename == "mimetype":
                     # mimetype must be stored uncompressed
                     dst.writestr(item, src.read(item.filename),
