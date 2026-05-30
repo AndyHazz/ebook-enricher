@@ -129,7 +129,9 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
     # Prepare cover override (best-effort — failures here never block
     # metadata enrichment).
     cover_override = None
-    if chosen.image_url:
+    if chosen.image_url and (
+        chosen.image_width is None or chosen.image_width >= cover.MIN_COVER_WIDTH
+    ):
         existing_cover_path = cover.find_cover_path_in_opf(path)
         if existing_cover_path:
             cover_bytes = await cover.download_cover(chosen.image_url)
