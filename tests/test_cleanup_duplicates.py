@@ -157,3 +157,39 @@ def test_symlink_escape_blocked(tmp_path):
     )
     # Non-zero exit OR clean refusal — either way the real file must survive
     assert real.exists(), "symlink target outside safe root must not be deleted"
+
+
+def test_symlink_escape_blocked_when_loser_symlinks_outside(tmp_path):
+    """The dangerous case: a LOSER (lower-priority format) is a symlink
+    pointing outside the safe root. The script must refuse to delete
+    via the symlink, protecting the real file outside.
+    """
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    # Real file outside, that must survive
+    real = outside / "Important.mobi"
+    real.write_bytes(b"do-not-delete")
+
+    # Symlink inside safe pointing to it (.mobi loses to .epub by priority)
+    link = safe / "Important.mobi"
+    link.symlink_to(real)
+
+    # Real keeper inside safe (.epub wins)
+    (safe / "Important.epub").write_bytes(b"keeper")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(safe),
+         "--commit", "--allow-root", str(safe)],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    # Script raises RuntimeError because resolved loser is outside safe
+    assert result.returncode != 0
+    # Real file outside must NOT be deleted
+    assert real.exists(), "symlink target outside safe root must not be deleted"
+    assert real.read_bytes() == b"do-not-delete"
+    # Keeper inside safe was also not touched (script halted before delete)
+    assert (safe / "Important.epub").exists()

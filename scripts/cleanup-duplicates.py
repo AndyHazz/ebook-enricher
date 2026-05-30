@@ -65,6 +65,7 @@ def main() -> int:
 
     total_losers = 0
     total_bytes = 0
+    to_delete: list[Path] = []
     for group in multi.values():
         keeper, losers = pick_best(group)
         print(f"keep:   {keeper}")
@@ -77,6 +78,7 @@ def main() -> int:
             total_losers += 1
             total_bytes += size
             print(f"delete: {loser}  ({size} bytes)")
+            to_delete.append(loser)
 
     print()
     print(
@@ -88,10 +90,8 @@ def main() -> int:
         print("(dry-run; use --commit to delete)")
         return 0
 
-    for group in multi.values():
-        keeper, losers = pick_best(group)
-        for loser in losers:
-            os.unlink(loser)
+    for loser in to_delete:
+        os.unlink(loser)
     print("committed.")
     return 0
 

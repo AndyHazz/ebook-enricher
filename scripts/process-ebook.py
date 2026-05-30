@@ -159,6 +159,13 @@ def main() -> int:
         )
         return 2
 
+    if not args.sync_base.is_dir():
+        print(
+            f"sync-base does not exist or is not a directory: {args.sync_base}",
+            file=sys.stderr,
+        )
+        return 2
+
     staging_dir = args.sync_base / args.staging_subdir
     _sweep_staging(staging_dir)
 
