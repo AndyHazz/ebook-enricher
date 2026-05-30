@@ -93,3 +93,60 @@ def test_save_sidecar_returns_false_when_no_cover(epub_without_cover):
     assert ok is False
     sidecar = epub_without_cover.parent / (epub_without_cover.stem + ".original.jpg")
     assert not sidecar.exists()
+
+
+def _make_jpeg(width: int, height: int) -> bytes:
+    """Generate a real JPEG of the given size for tests."""
+    from io import BytesIO
+    from PIL import Image
+    img = Image.new("RGB", (width, height), (200, 100, 50))
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def test_resize_skips_when_already_small_enough():
+    """Image with longest edge <= 1648 is returned unchanged (no re-encoding)."""
+    img_bytes = _make_jpeg(1200, 1648)  # exactly at the limit, no resize
+    result = cover.resize_cover_if_needed(img_bytes)
+    assert result is img_bytes or result == img_bytes  # unchanged
+
+
+def test_resize_skips_when_smaller():
+    """Image smaller than target is returned unchanged."""
+    img_bytes = _make_jpeg(800, 1000)
+    result = cover.resize_cover_if_needed(img_bytes)
+    assert result == img_bytes
+
+
+def test_resize_downscales_when_longest_edge_too_big():
+    """Image with longest edge > MAX_COVER_LONG_EDGE is downscaled to fit."""
+    from io import BytesIO
+    from PIL import Image
+    img_bytes = _make_jpeg(2000, 3000)  # 3000 > 1648
+    result = cover.resize_cover_if_needed(img_bytes)
+    # Result is smaller than input
+    assert len(result) < len(img_bytes)
+    # Decode and check dimensions
+    img = Image.open(BytesIO(result))
+    assert max(img.size) == cover.MAX_COVER_LONG_EDGE
+    # Aspect preserved (2:3 → roughly 1099:1648)
+    w, h = img.size
+    assert abs((w / h) - (2000 / 3000)) < 0.01
+
+
+def test_resize_handles_wider_than_tall():
+    """A landscape image (rare for book covers) is also clamped to 1648 max."""
+    from io import BytesIO
+    from PIL import Image
+    img_bytes = _make_jpeg(2400, 1200)
+    result = cover.resize_cover_if_needed(img_bytes)
+    img = Image.open(BytesIO(result))
+    assert max(img.size) == cover.MAX_COVER_LONG_EDGE
+
+
+def test_resize_returns_original_on_decode_failure():
+    """Garbage bytes → return them unchanged (don't crash)."""
+    garbage = b"this is not a jpeg at all"
+    result = cover.resize_cover_if_needed(garbage)
+    assert result == garbage

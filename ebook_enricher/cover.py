@@ -163,3 +163,41 @@ def save_sidecar_if_absent(epub_path: Path) -> bool:
         return False
 
     return True
+
+
+MAX_COVER_LONG_EDGE = 1648  # PW5's larger display dimension at native 300dpi
+JPEG_QUALITY = 85
+
+
+def resize_cover_if_needed(image_bytes: bytes) -> bytes:
+    """If the image's longest edge exceeds MAX_COVER_LONG_EDGE, downscale
+    (preserving aspect ratio) and re-encode as JPEG quality 85. Otherwise
+    return the input bytes unchanged.
+
+    Never raises: on any decode/encode failure, returns the input bytes
+    untouched and logs a warning. Cover replacement is best-effort.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(image_bytes))
+        if max(img.size) <= MAX_COVER_LONG_EDGE:
+            return image_bytes  # already small enough; no re-encode
+        img.thumbnail(
+            (MAX_COVER_LONG_EDGE, MAX_COVER_LONG_EDGE),
+            Image.Resampling.LANCZOS,
+        )
+        # Ensure RGB for JPEG (book covers usually are, but defensive)
+        if img.mode != "RGB":
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA":
+                background.paste(img, mask=img.split()[-1])
+            else:
+                background.paste(img.convert("RGB"))
+            img = background
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        logger.warning("cover resize failed, using original: %s", e)
+        return image_bytes
