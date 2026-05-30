@@ -14,8 +14,15 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import shutil
 import sys
+import time
+import uuid
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from format_selector import PREFERENCE_CHAIN, group_by_book, is_ebook_ext, pick_best
 
@@ -52,6 +59,84 @@ def plan_actions(
     return ebook_jobs, passthrough_jobs
 
 
+ENRICH_TIMEOUT_S = 30
+
+
+def _post_enrich(enricher_url: str, file_path: Path) -> None:
+    """POST {"path": str} to enricher_url. Logs failures, never raises."""
+    body = json.dumps({"path": str(file_path)}).encode()
+    req = Request(
+        enricher_url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=ENRICH_TIMEOUT_S) as resp:
+            if resp.status != 200:
+                print(
+                    f"  enricher returned HTTP {resp.status} for {file_path}",
+                    file=sys.stderr,
+                )
+    except URLError as e:
+        print(f"  enricher unreachable: {e}", file=sys.stderr)
+    except Exception as e:  # broad: enricher must never block pipeline
+        print(f"  enricher call failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _apply_perms_from_parent(dest: Path) -> None:
+    """Copy mode/uid/gid from dest.parent so the new file matches the
+    surrounding convention (typically 664 docker:users)."""
+    st = os.stat(dest.parent)
+    try:
+        os.chown(dest, st.st_uid, st.st_gid)
+    except PermissionError:
+        pass  # non-root tests can't chown; production runs as root
+    os.chmod(dest, st.st_mode & 0o777 & ~0o111)  # strip exec bits
+
+
+def _publish_ebook(
+    keeper: Path,
+    dest: Path,
+    staging_dir: Path,
+    enricher_url: str,
+) -> None:
+    """Copy keeper to staging, enrich (if epub), atomic-rename to dest."""
+    assert keeper.resolve() != dest.resolve(), (
+        f"refusing to publish into source path: {keeper}"
+    )
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staging_path = staging_dir / (uuid.uuid4().hex + keeper.suffix)
+    shutil.copy2(keeper, staging_path)
+
+    if keeper.suffix.lower() == ".epub":
+        _post_enrich(enricher_url, staging_path)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging_path, dest)
+    _apply_perms_from_parent(dest)
+
+
+def _passthrough(src: Path, dest: Path) -> None:
+    """Copy non-ebook file directly (no staging, no enrich)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    _apply_perms_from_parent(dest)
+
+
+def _sweep_staging(staging_dir: Path, max_age_s: int = 86_400) -> None:
+    """Delete stale files in .staging (orphans from killed runs)."""
+    if not staging_dir.exists():
+        return
+    cutoff = time.time() - max_age_s
+    for p in staging_dir.iterdir():
+        if p.is_file() and p.stat().st_mtime < cutoff:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", type=Path, required=True)
@@ -64,7 +149,7 @@ def main() -> int:
 
     if not args.source.exists():
         print(f"source does not exist: {args.source}", file=sys.stderr)
-        return 0  # no-op, matches current behaviour
+        return 0
 
     try:
         args.source.resolve().relative_to(args.save_path.resolve())
@@ -74,6 +159,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    staging_dir = args.sync_base / args.staging_subdir
+    _sweep_staging(staging_dir)
 
     ebook_jobs, passthrough_jobs = plan_actions(
         args.source, args.save_path, args.sync_base
@@ -89,8 +177,11 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    # Real-mode copy/enrich/rename comes in Task 6.
-    raise NotImplementedError("real-mode not yet implemented; use --dry-run")
+    for keeper, dest, _losers in ebook_jobs:
+        _publish_ebook(keeper, dest, staging_dir, args.enricher_url)
+    for src, dest in passthrough_jobs:
+        _passthrough(src, dest)
+    return 0
 
 
 if __name__ == "__main__":

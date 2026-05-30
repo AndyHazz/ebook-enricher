@@ -112,3 +112,160 @@ def test_source_not_under_save_path_errors(tmp_path):
     )
     assert result.returncode == 2
     assert "not under save-path" in result.stderr
+
+
+import http.server
+import threading
+from urllib.parse import urlparse
+
+
+class _MockEnricherHandler(http.server.BaseHTTPRequestHandler):
+    """In-memory mock enricher: reads the posted path, appends ENRICHED
+    to the file so we can prove the published file is the modified one.
+    Tracks every received path on the class so tests can assert."""
+
+    received_paths: list[str] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode()
+        import json as _json
+        data = _json.loads(body)
+        path = data["path"]
+        _MockEnricherHandler.received_paths.append(path)
+        # Modify the staging file to prove enrichment ran
+        with open(path, "ab") as f:
+            f.write(b"-ENRICHED")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"enriched"}')
+
+    def log_message(self, *a, **kw):  # silence test output
+        pass
+
+
+@pytest.fixture
+def mock_enricher():
+    """Start a mock enricher HTTP server on a random port."""
+    _MockEnricherHandler.received_paths = []
+    server = http.server.HTTPServer(("127.0.0.1", 0), _MockEnricherHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{port}/enrich"
+    server.shutdown()
+
+
+def test_real_run_publishes_chosen_format_only(tmp_path, mock_enricher):
+    """Real run: epub published, pdf skipped, cover.jpg passes through,
+    enricher was called with the staging path."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Published: epub (enriched bytes) + cover.jpg. NOT the pdf.
+    epub = sync / "Ready Player One" / "Ready Player One.epub"
+    pdf = sync / "Ready Player One" / "Ready Player One.pdf"
+    cover = sync / "Ready Player One" / "cover.jpg"
+    assert epub.exists()
+    assert cover.exists()
+    assert not pdf.exists()
+    # Proves we published the enricher's output, not the raw seed copy
+    assert epub.read_bytes() == b"epub-bytes-ENRICHED"
+    assert cover.read_bytes() == b"jpg-bytes"
+
+    # Staging dir is empty after run
+    staging = sync / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
+
+    # Enricher received a path that ended up renamed to the final dest
+    assert len(_MockEnricherHandler.received_paths) == 1
+    # Path it received was inside .staging (not the final dest, not the seed)
+    received = _MockEnricherHandler.received_paths[0]
+    assert ".staging" in received
+
+
+def test_seed_byte_identical_after_real_run(tmp_path, mock_enricher):
+    """Seed unchanged after a real run (the headline invariant)."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    before = _dir_sha256(save)
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    after = _dir_sha256(save)
+    assert before == after
+
+
+def test_single_file_torrent(tmp_path, mock_enricher):
+    """When source is a single file (not a dir), still works."""
+    save = tmp_path / "torrents"
+    save.mkdir()
+    epub = save / "Snow Crash.epub"
+    epub.write_bytes(b"snow")
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(epub),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+
+    dest = sync / "Snow Crash.epub"
+    assert dest.exists()
+    assert dest.read_bytes() == b"snow-ENRICHED"
+
+
+def test_enricher_failure_still_publishes(tmp_path):
+    """Enricher unreachable — file still published (un-enriched). Matches
+    current behaviour: enrich failure does not block the copy."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", "http://127.0.0.1:1/enrich",  # nothing listens
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+
+    epub = sync / "Ready Player One" / "Ready Player One.epub"
+    assert epub.exists()
+    assert epub.read_bytes() == b"epub-bytes"  # un-enriched
