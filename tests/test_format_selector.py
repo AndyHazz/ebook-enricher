@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from format_selector import PREFERENCE_CHAIN, is_ebook_ext
+from format_selector import (
+    PREFERENCE_CHAIN,
+    is_ebook_ext,
+    group_by_book,
+    pick_best,
+)
 
 
 def test_preference_chain_order():
@@ -30,9 +35,6 @@ def test_is_ebook_ext_unknown():
     assert is_ebook_ext(".opf") is False
     assert is_ebook_ext("") is False
     assert is_ebook_ext("epubx") is False  # near miss
-
-
-from format_selector import group_by_book
 
 
 def test_group_by_book_same_dir_same_stem(tmp_path):
@@ -83,9 +85,6 @@ def test_group_by_book_only_ebook_extensions(tmp_path):
 def test_group_by_book_empty():
     """Empty input yields empty dict."""
     assert group_by_book([]) == {}
-
-
-from format_selector import pick_best
 
 
 def test_pick_best_epub_wins_over_pdf(tmp_path):
