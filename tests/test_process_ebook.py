@@ -7,6 +7,7 @@ invariant the user explicitly cares about).
 import hashlib
 import http.server
 import json
+import os
 import threading
 from pathlib import Path
 import subprocess
@@ -300,3 +301,79 @@ def test_mobi_published_without_enricher_call(tmp_path, mock_enricher):
     assert mobi.read_bytes() == b"mobi-bytes"
     # Enricher was NOT called for non-epub
     assert _MockEnricherHandler.received_paths == []
+
+
+def test_syncthing_junk_files_skipped(tmp_path, mock_enricher):
+    """Files matching Syncthing internal patterns (*.parts, .syncthing.*.tmp,
+    .stversions/, .stfolder) must NOT be passed through to sync dir."""
+    save = tmp_path / "torrents"
+    save.mkdir()
+    content = save / "SomeBook"
+    content.mkdir()
+    (content / "SomeBook.epub").write_bytes(b"epub-bytes")
+    # Junk files we should never copy
+    (content / ".62d4d4dd.parts").write_bytes(b"partial-block-map")
+    (content / ".syncthing.tmp.tmp").write_bytes(b"syncthing-temp")
+    (content / ".stfolder").write_bytes(b"folder-marker")
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+
+    # epub published normally
+    assert (sync / "SomeBook" / "SomeBook.epub").exists()
+    # Junk files NOT in destination
+    assert not (sync / "SomeBook" / ".62d4d4dd.parts").exists()
+    assert not (sync / "SomeBook" / ".syncthing.tmp.tmp").exists()
+    assert not (sync / "SomeBook" / ".stfolder").exists()
+
+
+def test_hardlinked_same_file_does_not_crash(tmp_path, mock_enricher):
+    """If a passthrough source and dest are hardlinks to the same inode
+    (legacy from a prior hardlink-based pipeline), the script must
+    skip them gracefully rather than crash with SameFileError."""
+    save = tmp_path / "torrents"
+    save.mkdir()
+    content = save / "BookWithHardlink"
+    content.mkdir()
+    (content / "BookWithHardlink.epub").write_bytes(b"epub-bytes")
+
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    sync_book_dir = sync / "BookWithHardlink"
+    sync_book_dir.mkdir(parents=True)
+
+    # Create a non-ebook file that's hardlinked between source and dest
+    src_file = content / "cover.jpg"
+    src_file.write_bytes(b"jpg-bytes")
+    dest_file = sync_book_dir / "cover.jpg"
+    os.link(src_file, dest_file)  # Same inode
+    assert src_file.stat().st_ino == dest_file.stat().st_ino
+
+    # Should complete without raising SameFileError
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 0, f"Should not crash. stderr:\n{result.stderr}"
+    # epub still published
+    assert (sync / "BookWithHardlink" / "BookWithHardlink.epub").exists()
+    # cover.jpg still exists (the original hardlink — we didn't delete it)
+    assert dest_file.exists()

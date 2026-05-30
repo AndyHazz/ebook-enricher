@@ -27,6 +27,34 @@ from urllib.request import Request, urlopen
 from format_selector import PREFERENCE_CHAIN, group_by_book, is_ebook_ext, pick_best
 
 
+# Filenames matching these glob patterns are Syncthing/system internals that
+# must never be propagated from a torrent into the sync folder. Most are
+# Syncthing's incomplete-download cache or temp files; .stfolder is the
+# folder-marker file Syncthing creates per shared folder.
+_SKIP_FILENAME_PATTERNS: tuple[str, ...] = (
+    "*.parts",          # Syncthing partial-download block maps
+    ".syncthing.*.tmp", # Syncthing in-flight temp files
+    ".stfolder",
+)
+
+_SKIP_PARENT_DIRS: frozenset[str] = frozenset({".stversions", ".staging"})
+
+
+def _is_skip_file(path: Path) -> bool:
+    """True if this file should be silently skipped during passthrough.
+    Catches Syncthing internals and our own staging dir."""
+    if any(part in _SKIP_PARENT_DIRS for part in path.parts):
+        return True
+    name = path.name
+    return any(path.match(pat) or _glob_match(name, pat) for pat in _SKIP_FILENAME_PATTERNS)
+
+
+def _glob_match(name: str, pattern: str) -> bool:
+    """fnmatch-style glob on a single name (not full path)."""
+    import fnmatch
+    return fnmatch.fnmatchcase(name, pattern)
+
+
 def collect_files(source: Path) -> list[Path]:
     """Return every file under source (recursive). source may be a
     single file or a directory."""
@@ -45,7 +73,7 @@ def plan_actions(
     ebook_jobs: [(keeper_src, dest_path, losers)]
     passthrough_jobs: [(src, dest_path)]
     """
-    files = collect_files(source)
+    files = [f for f in collect_files(source) if not _is_skip_file(f)]
     ebooks = [f for f in files if is_ebook_ext(f.suffix)]
     others = [f for f in files if not is_ebook_ext(f.suffix)]
 
@@ -117,7 +145,19 @@ def _publish_ebook(
 
 
 def _passthrough(src: Path, dest: Path) -> None:
-    """Copy non-ebook file directly (no staging, no enrich)."""
+    """Copy non-ebook file directly (no staging, no enrich).
+
+    Defensive against legacy hardlinks between torrent seed and sync
+    folder (older pipelines used `ln` instead of `cp`). If src and
+    dest resolve to the same inode, log and skip rather than crashing
+    on shutil.SameFileError.
+    """
+    if dest.exists() and src.stat().st_ino == dest.stat().st_ino:
+        print(
+            f"  skip passthrough: {src.name} (hardlink to dest already)",
+            file=sys.stderr,
+        )
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     _apply_perms_from_parent(dest)
