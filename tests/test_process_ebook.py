@@ -5,6 +5,9 @@ directory is byte-identical before/after (the seed-protection
 invariant the user explicitly cares about).
 """
 import hashlib
+import http.server
+import json
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -114,11 +117,6 @@ def test_source_not_under_save_path_errors(tmp_path):
     assert "not under save-path" in result.stderr
 
 
-import http.server
-import threading
-from urllib.parse import urlparse
-
-
 class _MockEnricherHandler(http.server.BaseHTTPRequestHandler):
     """In-memory mock enricher: reads the posted path, appends ENRICHED
     to the file so we can prove the published file is the modified one.
@@ -129,8 +127,7 @@ class _MockEnricherHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode()
-        import json as _json
-        data = _json.loads(body)
+        data = json.loads(body)
         path = data["path"]
         _MockEnricherHandler.received_paths.append(path)
         # Modify the staging file to prove enrichment ran
@@ -269,3 +266,37 @@ def test_enricher_failure_still_publishes(tmp_path):
     epub = sync / "Ready Player One" / "Ready Player One.epub"
     assert epub.exists()
     assert epub.read_bytes() == b"epub-bytes"  # un-enriched
+
+
+def test_mobi_published_without_enricher_call(tmp_path, mock_enricher):
+    """A .mobi keeper (no .epub available) is published WITHOUT calling
+    the enricher (it only enriches .epub)."""
+    save = tmp_path / "torrents"
+    save.mkdir()
+    content = save / "Old Book"
+    content.mkdir()
+    (content / "Old Book.mobi").write_bytes(b"mobi-bytes")
+    (content / "Old Book.pdf").write_bytes(b"pdf-bytes")
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+
+    mobi = sync / "Old Book" / "Old Book.mobi"
+    pdf = sync / "Old Book" / "Old Book.pdf"
+    assert mobi.exists()
+    assert not pdf.exists()
+    # mobi was published raw (no enricher modification)
+    assert mobi.read_bytes() == b"mobi-bytes"
+    # Enricher was NOT called for non-epub
+    assert _MockEnricherHandler.received_paths == []

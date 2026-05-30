@@ -102,9 +102,8 @@ def _publish_ebook(
     enricher_url: str,
 ) -> None:
     """Copy keeper to staging, enrich (if epub), atomic-rename to dest."""
-    assert keeper.resolve() != dest.resolve(), (
-        f"refusing to publish into source path: {keeper}"
-    )
+    if keeper.resolve() == dest.resolve():
+        raise ValueError(f"refusing to publish into source path: {keeper}")
     staging_dir.mkdir(parents=True, exist_ok=True)
     staging_path = staging_dir / (uuid.uuid4().hex + keeper.suffix)
     shutil.copy2(keeper, staging_path)
