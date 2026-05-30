@@ -125,3 +125,41 @@ def find_cover_path_in_opf(epub_path: Path) -> Optional[str]:
             return None
     except zipfile.BadZipFile:
         return None
+
+
+def _sidecar_path(epub_path: Path) -> Path:
+    """Recovery-sidecar location: same directory, base name with
+    .original.jpg suffix. e.g. /a/b/Foo.epub → /a/b/Foo.original.jpg."""
+    return epub_path.parent / (epub_path.stem + ".original.jpg")
+
+
+def save_sidecar_if_absent(epub_path: Path) -> bool:
+    """If `<epub>.original.jpg` does not exist next to the EPUB, extract
+    the current cover bytes and write them as the sidecar. Idempotent:
+    returns True if a usable sidecar exists at end of call (either pre-
+    existing or just-written). Returns False if we couldn't save
+    (no cover in EPUB, OS error) — caller should skip cover swap in
+    that case to avoid losing the only original.
+    """
+    sidecar = _sidecar_path(epub_path)
+    if sidecar.exists():
+        return True
+
+    cover_zip_path = find_cover_path_in_opf(epub_path)
+    if not cover_zip_path:
+        return False
+
+    try:
+        with zipfile.ZipFile(epub_path) as zf:
+            data = zf.read(cover_zip_path)
+    except (zipfile.BadZipFile, KeyError) as e:
+        logger.warning("could not read cover from EPUB %s: %s", epub_path, e)
+        return False
+
+    try:
+        sidecar.write_bytes(data)
+    except OSError as e:
+        logger.warning("could not write sidecar %s: %s", sidecar, e)
+        return False
+
+    return True

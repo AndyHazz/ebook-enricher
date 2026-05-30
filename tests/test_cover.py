@@ -58,3 +58,38 @@ def test_find_cover_path_returns_none_when_no_meta(epub_without_cover):
 def test_find_cover_path_returns_none_when_manifest_broken(epub_with_broken_cover_ref):
     """OPF cover meta points at a manifest id that doesn't exist → None."""
     assert cover.find_cover_path_in_opf(epub_with_broken_cover_ref) is None
+
+
+def test_save_sidecar_writes_once(epub_with_cover):
+    """First call writes the sidecar; second call is a no-op."""
+    sidecar = epub_with_cover.with_suffix("").parent / (
+        epub_with_cover.stem + ".original.jpg"
+    )
+    assert not sidecar.exists()
+
+    ok1 = cover.save_sidecar_if_absent(epub_with_cover)
+    assert ok1 is True
+    assert sidecar.exists()
+    first_bytes = sidecar.read_bytes()
+
+    ok2 = cover.save_sidecar_if_absent(epub_with_cover)
+    assert ok2 is True
+    # Bytes unchanged — second call did NOT rewrite
+    assert sidecar.read_bytes() == first_bytes
+
+
+def test_save_sidecar_preserves_true_original(epub_with_cover):
+    """Sidecar bytes are the original cover bytes, not anything else."""
+    cover.save_sidecar_if_absent(epub_with_cover)
+    sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
+    # COVER_BYTES_ORIGINAL is defined in conftest.py
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    assert sidecar.read_bytes() == COVER_BYTES_ORIGINAL
+
+
+def test_save_sidecar_returns_false_when_no_cover(epub_without_cover):
+    """No cover in EPUB → can't save sidecar → returns False."""
+    ok = cover.save_sidecar_if_absent(epub_without_cover)
+    assert ok is False
+    sidecar = epub_without_cover.parent / (epub_without_cover.stem + ".original.jpg")
+    assert not sidecar.exists()
