@@ -66,6 +66,15 @@ def main() -> int:
         print(f"source does not exist: {args.source}", file=sys.stderr)
         return 0  # no-op, matches current behaviour
 
+    try:
+        args.source.resolve().relative_to(args.save_path.resolve())
+    except ValueError:
+        print(
+            f"source ({args.source}) is not under save-path ({args.save_path})",
+            file=sys.stderr,
+        )
+        return 2
+
     ebook_jobs, passthrough_jobs = plan_actions(
         args.source, args.save_path, args.sync_base
     )

@@ -86,3 +86,29 @@ def test_seed_unchanged_in_dry_run(tmp_path):
     )
     after = _dir_sha256(save)
     assert before == after
+
+
+def test_source_not_under_save_path_errors(tmp_path):
+    """Mismatched source/save-path returns non-zero with clear error."""
+    save = tmp_path / "save"
+    source = tmp_path / "elsewhere"
+    save.mkdir()
+    source.mkdir()
+    (source / "Book.epub").write_bytes(b"x")
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(source),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", "http://does.not.matter/enrich",
+            "--dry-run",
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 2
+    assert "not under save-path" in result.stderr
