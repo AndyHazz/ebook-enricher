@@ -13,12 +13,15 @@ from format_selector import (
 
 
 def test_preference_chain_order():
-    """epub is highest, cbr is lowest."""
+    """epub is highest, rtf is lowest (lrf and rtf are dead formats kept
+    as last-resort fallbacks so they still get deduped when paired with
+    a better format)."""
     assert PREFERENCE_CHAIN[0] == "epub"
     assert PREFERENCE_CHAIN[1] == "azw3"
     assert PREFERENCE_CHAIN[2] == "mobi"
     assert PREFERENCE_CHAIN[3] == "pdf"
-    assert PREFERENCE_CHAIN[-1] == "cbr"
+    assert PREFERENCE_CHAIN[-2] == "lrf"
+    assert PREFERENCE_CHAIN[-1] == "rtf"
 
 
 def test_is_ebook_ext_known():

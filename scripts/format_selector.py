@@ -12,7 +12,7 @@ from typing import Iterable
 
 # Highest preference first. New formats can be appended.
 PREFERENCE_CHAIN: tuple[str, ...] = (
-    "epub", "azw3", "mobi", "pdf", "lit", "txt", "cbz", "cbr",
+    "epub", "azw3", "mobi", "pdf", "lit", "txt", "cbz", "cbr", "lrf", "rtf",
 )
 
 
