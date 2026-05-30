@@ -4,9 +4,15 @@ download from URL. No enrichment policy here — that lives in enrich.py.
 from __future__ import annotations
 
 import logging
+import zipfile
+from pathlib import Path
 from typing import Optional
 
 import httpx
+# Use defusedxml's drop-in replacement for ElementTree — a malicious
+# EPUB could otherwise feed us a billion-laughs payload or external
+# entity reference and OOM/exfiltrate from the enricher container.
+import defusedxml.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
@@ -46,3 +52,76 @@ async def download_cover(url: str, *, timeout_s: int = DOWNLOAD_TIMEOUT_S) -> Op
         return None
 
     return data
+
+
+_NS = {
+    "opf": "http://www.idpf.org/2007/opf",
+    "container": "urn:oasis:names:tc:opendocument:xmlns:container",
+}
+
+
+def _find_opf_path(zf: zipfile.ZipFile) -> Optional[str]:
+    """Look up the OPF path from META-INF/container.xml. Returns None
+    if missing or unparseable — caller treats that as 'no cover'."""
+    try:
+        container = ET.fromstring(zf.read("META-INF/container.xml"))
+    except (KeyError, ET.ParseError):
+        return None
+    rootfile = container.find("container:rootfiles/container:rootfile", _NS)
+    if rootfile is None:
+        return None
+    return rootfile.get("full-path")
+
+
+def find_cover_path_in_opf(epub_path: Path) -> Optional[str]:
+    """Open the EPUB, locate <meta name="cover" content="<id>"/> in OPF,
+    resolve <id> to the manifest item's href (joined to the OPF dir).
+    Returns the path-within-zip (e.g. 'OEBPS/images/cover.jpg') or None
+    if no cover meta is declared OR the declared manifest item isn't
+    present in the zip.
+    """
+    try:
+        with zipfile.ZipFile(epub_path) as zf:
+            opf_path = _find_opf_path(zf)
+            if not opf_path:
+                return None
+            try:
+                opf_root = ET.fromstring(zf.read(opf_path))
+            except (KeyError, ET.ParseError):
+                return None
+
+            # Find <meta name="cover" content="<id>"/> — EPUB 2 style.
+            metadata = opf_root.find("opf:metadata", _NS)
+            if metadata is None:
+                return None
+            cover_id = None
+            for meta_el in metadata.findall("opf:meta", _NS):
+                if meta_el.get("name") == "cover":
+                    cover_id = meta_el.get("content")
+                    break
+            if not cover_id:
+                return None
+
+            # Resolve the manifest item by id.
+            manifest = opf_root.find("opf:manifest", _NS)
+            if manifest is None:
+                return None
+            for item in manifest.findall("opf:item", _NS):
+                if item.get("id") == cover_id:
+                    href = item.get("href")
+                    if not href:
+                        return None
+                    # Resolve relative to the OPF dir
+                    opf_dir = str(Path(opf_path).parent)
+                    if opf_dir and opf_dir != ".":
+                        full = f"{opf_dir}/{href}"
+                    else:
+                        full = href
+                    # Must actually exist in the zip
+                    if full in zf.namelist():
+                        return full
+                    return None
+
+            return None
+    except zipfile.BadZipFile:
+        return None

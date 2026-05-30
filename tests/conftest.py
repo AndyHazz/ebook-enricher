@@ -87,3 +87,68 @@ def modern_epub(tmp_path: Path) -> Path:
     <meta property="calibre:series_index">3</meta>
     """
     return _build_epub(tmp_path / "modern.epub", extra)
+
+
+COVER_BYTES_ORIGINAL = b"ORIGINAL_COVER_BYTES" + b"x" * 60_000  # > MIN_COVER_SIZE_BYTES
+
+
+def _opf_with_cover(extra_metadata: str = "") -> str:
+    """OPF that declares a cover meta + manifest item, pointing at
+    OEBPS/images/cover.jpg."""
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">test-uid-12345</dc:identifier>
+    <dc:title>Test Book Title</dc:title>
+    <dc:creator>Test Author</dc:creator>
+    <dc:language>en</dc:language>
+    <meta name="cover" content="cover-img"/>
+    {extra_metadata}
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="cover-img" href="images/cover.jpg" media-type="image/jpeg"/>
+  </manifest>
+  <spine>
+    <itemref idref="nav"/>
+  </spine>
+</package>
+"""
+
+
+@pytest.fixture
+def epub_with_cover(tmp_path) -> Path:
+    """A minimal EPUB containing a cover image at OEBPS/images/cover.jpg."""
+    epub = tmp_path / "with_cover.epub"
+    with zipfile.ZipFile(epub, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", _opf_with_cover())
+        zf.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+        zf.writestr("OEBPS/images/cover.jpg", COVER_BYTES_ORIGINAL)
+    return epub
+
+
+@pytest.fixture
+def epub_without_cover(tmp_path) -> Path:
+    """A minimal EPUB with no cover meta in OPF."""
+    epub = tmp_path / "no_cover.epub"
+    with zipfile.ZipFile(epub, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", _opf())  # uses existing _opf() without cover
+        zf.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+    return epub
+
+
+@pytest.fixture
+def epub_with_broken_cover_ref(tmp_path) -> Path:
+    """OPF declares cover meta pointing at a manifest id that doesn't exist."""
+    epub = tmp_path / "broken_cover.epub"
+    bad_opf = _opf_with_cover().replace('content="cover-img"', 'content="missing-id"')
+    with zipfile.ZipFile(epub, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", bad_opf)
+        zf.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+    return epub

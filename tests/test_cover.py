@@ -42,3 +42,19 @@ async def test_download_cover_rejects_tiny_payload():
         respx.get(url).mock(return_value=httpx.Response(200, content=body))
         result = await cover.download_cover(url)
     assert result is None
+
+
+def test_find_cover_path_finds_standard_meta(epub_with_cover):
+    """OPF with <meta name="cover" content="X"/> + manifest item → returns the href."""
+    path = cover.find_cover_path_in_opf(epub_with_cover)
+    assert path == "OEBPS/images/cover.jpg"
+
+
+def test_find_cover_path_returns_none_when_no_meta(epub_without_cover):
+    """OPF without cover meta → None."""
+    assert cover.find_cover_path_in_opf(epub_without_cover) is None
+
+
+def test_find_cover_path_returns_none_when_manifest_broken(epub_with_broken_cover_ref):
+    """OPF cover meta points at a manifest id that doesn't exist → None."""
+    assert cover.find_cover_path_in_opf(epub_with_broken_cover_ref) is None
