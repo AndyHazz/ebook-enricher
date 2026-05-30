@@ -83,3 +83,77 @@ def test_group_by_book_only_ebook_extensions(tmp_path):
 def test_group_by_book_empty():
     """Empty input yields empty dict."""
     assert group_by_book([]) == {}
+
+
+from format_selector import pick_best
+
+
+def test_pick_best_epub_wins_over_pdf(tmp_path):
+    """EPUB beats PDF."""
+    epub = tmp_path / "Book.epub"
+    pdf = tmp_path / "Book.pdf"
+    epub.write_bytes(b"x" * 100)
+    pdf.write_bytes(b"x" * 999_999)  # PDF larger but EPUB still wins
+    keeper, losers = pick_best([epub, pdf])
+    assert keeper == epub
+    assert losers == [pdf]
+
+
+def test_pick_best_falls_back_to_mobi(tmp_path):
+    """No EPUB present — chain falls back to next available format."""
+    mobi = tmp_path / "Book.mobi"
+    pdf = tmp_path / "Book.pdf"
+    mobi.write_bytes(b"x")
+    pdf.write_bytes(b"x")
+    keeper, losers = pick_best([mobi, pdf])
+    assert keeper == mobi
+    assert losers == [pdf]
+
+
+def test_pick_best_full_chain_priority(tmp_path):
+    """All formats present — epub wins, others lose in chain order."""
+    files = []
+    for ext in ("pdf", "epub", "mobi", "azw3", "txt"):
+        p = tmp_path / f"Book.{ext}"
+        p.write_bytes(b"x")
+        files.append(p)
+    keeper, losers = pick_best(files)
+    assert keeper.suffix == ".epub"
+    assert len(losers) == 4
+
+
+def test_pick_best_single_file(tmp_path):
+    """Single-file group returns (file, [])."""
+    f = tmp_path / "Solo.epub"
+    f.touch()
+    keeper, losers = pick_best([f])
+    assert keeper == f
+    assert losers == []
+
+
+def test_pick_best_tiebreak_keeps_larger(tmp_path):
+    """Two files with same winning format — larger wins, smaller loses."""
+    a = tmp_path / "Book_v1.epub"
+    b = tmp_path / "Book_v2.epub"
+    a.write_bytes(b"x" * 100)
+    b.write_bytes(b"x" * 200)
+    keeper, losers = pick_best([a, b])
+    assert keeper == b   # larger wins
+    assert losers == [a]
+
+
+def test_pick_best_empty_raises():
+    """Empty group is a caller bug."""
+    with pytest.raises(ValueError):
+        pick_best([])
+
+
+def test_pick_best_uses_lowercase_ext(tmp_path):
+    """Extension casing doesn't matter (FAT-filesystem fixtures)."""
+    epub_upper = tmp_path / "Book.EPUB"
+    mobi = tmp_path / "Book.mobi"
+    epub_upper.write_bytes(b"x")
+    mobi.write_bytes(b"x")
+    keeper, losers = pick_best([epub_upper, mobi])
+    assert keeper == epub_upper
+    assert losers == [mobi]

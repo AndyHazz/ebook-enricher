@@ -22,6 +22,43 @@ def is_ebook_ext(ext: str) -> bool:
     return ext.lower().lstrip(".") in PREFERENCE_CHAIN
 
 
+def pick_best(
+    group: list[Path],
+    chain: tuple[str, ...] = PREFERENCE_CHAIN,
+) -> tuple[Path, list[Path]]:
+    """Return (keeper, losers) for one group.
+
+    Keeper is the file with the highest-priority format in `chain`.
+    If multiple files share the keeper's format, the larger file wins
+    (heuristic for "higher quality version") and the rest become losers.
+    """
+    if not group:
+        raise ValueError("pick_best called with empty group")
+
+    # Bucket files by their normalised extension.
+    by_ext: dict[str, list[Path]] = {}
+    for p in group:
+        ext = p.suffix.lstrip(".").lower()
+        by_ext.setdefault(ext, []).append(p)
+
+    # Walk the chain in priority order; first match wins.
+    for ext in chain:
+        if ext in by_ext:
+            candidates = by_ext[ext]
+            if len(candidates) == 1:
+                keeper = candidates[0]
+            else:
+                # Tie-break: largest file wins.
+                keeper = max(candidates, key=lambda p: p.stat().st_size)
+            losers = [p for p in group if p != keeper]
+            return keeper, losers
+
+    # Group contained only unknown extensions — caller filtered wrong.
+    raise ValueError(
+        f"pick_best: no known ebook extension in {[p.name for p in group]}"
+    )
+
+
 def group_by_book(
     paths: Iterable[Path],
 ) -> dict[tuple[Path, str], list[Path]]:
