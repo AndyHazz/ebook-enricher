@@ -1,7 +1,9 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+import respx
 
 from ebook_enricher.enrich import EnrichResult, enrich_file
 from ebook_enricher.epub_meta import read_meta
@@ -272,3 +274,147 @@ async def test_picks_best_candidate_not_first(bare_epub: Path):
     # generic box-set metadata).
     meta = read_meta(bare_epub)
     assert meta.series == "Proper Series"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_replaces_cover_when_hardcover_has_image(epub_with_cover):
+    """When Hardcover returns a hit with image_url, cover gets replaced
+    and the original is preserved as a sidecar."""
+    from ebook_enricher.enrich import enrich_file
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    import zipfile
+
+    new_cover_bytes = b"HARDCOVER_NEW_COVER" + b"x" * 80_000
+    cover_url = "https://assets.hardcover.app/edition/1/new.jpg"
+
+    # Mock Hardcover search response with image
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 1,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "A description",
+                    "featured_series": {"series": {"name": "Test Series"}, "position": 1},
+                    "image": {"url": cover_url, "width": 1463, "height": 2401},
+                }
+            }]}}}
+        }),
+    )
+    # Mock the cover image fetch
+    respx.get(cover_url).mock(
+        return_value=httpx.Response(200, content=new_cover_bytes)
+    )
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    # Cover bytes inside the EPUB are now Hardcover's
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        assert zf.read("OEBPS/images/cover.jpg") == new_cover_bytes
+
+    # Sidecar exists with the TRUE original bytes
+    sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
+    assert sidecar.exists()
+    assert sidecar.read_bytes() == COVER_BYTES_ORIGINAL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_skips_cover_when_hardcover_no_image(epub_with_cover):
+    """Hit without image block → metadata written, no sidecar, no cover change."""
+    from ebook_enricher.enrich import enrich_file
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    import zipfile
+
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 1,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "A description",
+                    "featured_series": {"series": {"name": "Test Series"}, "position": 1},
+                    # No "image" key
+                }
+            }]}}}
+        }),
+    )
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL
+    sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
+    assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_skips_cover_when_download_fails(epub_with_cover):
+    """Cover download returns 503 → metadata still written, no sidecar,
+    no cover change."""
+    from ebook_enricher.enrich import enrich_file
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    import zipfile
+
+    cover_url = "https://assets.hardcover.app/edition/1/new.jpg"
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 1,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "A description",
+                    "featured_series": {"series": {"name": "Test Series"}, "position": 1},
+                    "image": {"url": cover_url, "width": 1463, "height": 2401},
+                }
+            }]}}}
+        }),
+    )
+    respx.get(cover_url).mock(return_value=httpx.Response(503))
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL
+    sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
+    assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_skips_cover_when_epub_lacks_cover_meta(epub_without_cover):
+    """EPUB has no <meta name="cover"> → metadata written, no cover swap,
+    no sidecar. Cover download not even attempted."""
+    from ebook_enricher.enrich import enrich_file
+
+    cover_url = "https://assets.hardcover.app/edition/1/new.jpg"
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 1,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "A description",
+                    "featured_series": {"series": {"name": "Test Series"}, "position": 1},
+                    "image": {"url": cover_url, "width": 1463, "height": 2401},
+                }
+            }]}}}
+        }),
+    )
+    # Cover download endpoint is NOT mocked — if the code tries to hit it,
+    # respx will raise. We assert that doesn't happen.
+
+    result = await enrich_file(epub_without_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    sidecar = epub_without_cover.parent / (epub_without_cover.stem + ".original.jpg")
+    assert not sidecar.exists()

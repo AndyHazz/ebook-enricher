@@ -21,6 +21,7 @@ Status = Literal[
 
 import httpx
 
+from ebook_enricher import cover
 from ebook_enricher.epub_meta import EpubMeta, read_meta, write_meta
 from ebook_enricher.hardcover import (
     HardcoverAuthError,
@@ -125,8 +126,22 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
     if not meta.subjects and chosen.genres:
         updates.subjects = chosen.genres
 
+    # Prepare cover override (best-effort — failures here never block
+    # metadata enrichment).
+    cover_override = None
+    if chosen.image_url:
+        existing_cover_path = cover.find_cover_path_in_opf(path)
+        if existing_cover_path:
+            cover_bytes = await cover.download_cover(chosen.image_url)
+            if cover_bytes:
+                saved = cover.save_sidecar_if_absent(path)
+                if saved:
+                    cover_override = (existing_cover_path, cover_bytes)
+                # else: sidecar save failed — skip the swap to avoid
+                # losing the only original.
+
     try:
-        write_meta(path, updates)
+        write_meta(path, updates, cover_override=cover_override)
     except Exception as e:
         logger.exception("Failed to write EPUB %s", path)
         return EnrichResult(status="error", reason=f"write_failed: {e}")
