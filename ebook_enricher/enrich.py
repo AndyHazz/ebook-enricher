@@ -136,6 +136,7 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         if existing_cover_path:
             cover_bytes = await cover.download_cover(chosen.image_url)
             if cover_bytes:
+                cover_bytes = cover.resize_cover_if_needed(cover_bytes)
                 saved = cover.save_sidecar_if_absent(path)
                 if saved:
                     cover_override = (existing_cover_path, cover_bytes)

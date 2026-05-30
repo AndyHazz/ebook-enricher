@@ -454,3 +454,50 @@ async def test_enrich_skips_cover_when_image_too_small(epub_with_cover):
         assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL
     sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
     assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_resizes_oversized_cover(epub_with_cover):
+    """A 2000x3000 Hardcover image is downsized to 1648 max edge before
+    being written into the EPUB."""
+    from ebook_enricher.enrich import enrich_file
+    from ebook_enricher.cover import MAX_COVER_LONG_EDGE
+    from io import BytesIO
+    from PIL import Image
+    import zipfile
+
+    # Make a real big JPEG
+    big_img = Image.new("RGB", (2000, 3000), (50, 100, 200))
+    big_buf = BytesIO()
+    big_img.save(big_buf, format="JPEG", quality=90)
+    big_bytes = big_buf.getvalue()
+    assert len(big_bytes) > 50_000  # passes MIN_COVER_SIZE_BYTES
+
+    cover_url = "https://assets.hardcover.app/edition/1/big.jpg"
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 1,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "A description",
+                    "featured_series": {"series": {"name": "Test Series"}, "position": 1},
+                    "image": {"url": cover_url, "width": 2000, "height": 3000},
+                }
+            }]}}}
+        }),
+    )
+    respx.get(cover_url).mock(return_value=httpx.Response(200, content=big_bytes))
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    # Cover inside EPUB is resized: longest edge <= 1648
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        published = zf.read("OEBPS/images/cover.jpg")
+    img = Image.open(BytesIO(published))
+    assert max(img.size) == MAX_COVER_LONG_EDGE
+    # And the result is smaller than the original
+    assert len(published) < len(big_bytes)
