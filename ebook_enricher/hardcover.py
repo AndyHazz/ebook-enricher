@@ -330,8 +330,11 @@ def pick_best_edition_cover(
             return False
         if _is_audio_format(e.edition_format):
             return False
-        if source_language and e.language_code and e.language_code != source_language:
-            return False
+        if source_language and e.language_code:
+            src_primary = source_language.split("-", 1)[0].lower()
+            ed_primary  = e.language_code.split("-", 1)[0].lower()
+            if src_primary != ed_primary:
+                return False
         return True
 
     survivors = [e for e in editions if survives(e)]

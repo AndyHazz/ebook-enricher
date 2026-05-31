@@ -427,6 +427,38 @@ async def test_fetch_editions_returns_empty_on_error():
     assert result == []
 
 
+def test_pick_best_edition_cover_matches_primary_subtag_en_us_vs_en():
+    """EPUB declares en-US; Hardcover edition has en. Should MATCH."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [_ec(w=2000, h=3000, lang="en")]
+    winner = pick_best_edition_cover(eds, source_language="en-US")
+    assert winner is not None
+
+
+def test_pick_best_edition_cover_matches_primary_subtag_en_vs_en_gb():
+    """Source en; Hardcover edition en-GB. Should MATCH."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [_ec(w=2000, h=3000, lang="en-GB")]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+
+
+def test_pick_best_edition_cover_primary_subtag_mismatch_still_rejected():
+    """Source en-US; edition fr-CA. Should NOT match (primary 'en' vs 'fr')."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [_ec(w=2000, h=3000, lang="fr-CA")]
+    winner = pick_best_edition_cover(eds, source_language="en-US")
+    assert winner is None
+
+
+def test_pick_best_edition_cover_language_case_insensitive():
+    """Case differences shouldn't block a match (defensive)."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [_ec(w=2000, h=3000, lang="EN")]
+    winner = pick_best_edition_cover(eds, source_language="en-us")
+    assert winner is not None
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_fetch_editions_handles_missing_language_block():
