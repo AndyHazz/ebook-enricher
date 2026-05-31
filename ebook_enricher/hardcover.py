@@ -230,6 +230,82 @@ def _aspect_ok(w: int, h: int) -> bool:
     return MIN_COVER_ASPECT <= a <= MAX_COVER_ASPECT
 
 
+EDITIONS_QUERY = """
+query EditionsForBook($book_id: Int!) {
+  editions(where: {book_id: {_eq: $book_id}}, order_by: {users_count: desc}) {
+    id
+    edition_format
+    image { url width height }
+    language { code2 }
+    users_count
+  }
+}
+"""
+
+
+def _parse_edition(raw: dict) -> Optional[EditionCover]:
+    """Parse one editions hit. Returns None if no usable image."""
+    image = raw.get("image") or {}
+    url = image.get("url")
+    w = image.get("width")
+    h = image.get("height")
+    if not url or not w or not h:
+        return None
+    language = raw.get("language") or {}
+    return EditionCover(
+        edition_id=raw["id"],
+        image_url=url,
+        image_width=int(w),
+        image_height=int(h),
+        edition_format=raw.get("edition_format"),
+        language_code=language.get("code2"),
+        users_count=int(raw.get("users_count") or 0),
+    )
+
+
+async def fetch_editions(book_id: int, token: str) -> list[EditionCover]:
+    """Return all editions for a Hardcover book, parsed into EditionCovers.
+    Skips editions with no usable image. Never raises — returns [] on any
+    network or parse error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+            resp = await client.post(
+                HARDCOVER_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "query": EDITIONS_QUERY,
+                    "variables": {"book_id": int(book_id)},
+                },
+            )
+    except (httpx.TimeoutException, httpx.RequestError) as e:
+        logger.warning("fetch_editions network error for book_id=%s: %s", book_id, e)
+        return []
+
+    if resp.status_code != 200:
+        logger.warning(
+            "fetch_editions HTTP %d for book_id=%s", resp.status_code, book_id
+        )
+        return []
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    if data.get("errors"):
+        logger.warning("fetch_editions GraphQL errors for book_id=%s: %s",
+                       book_id, data["errors"])
+        return []
+
+    raw_eds = (data.get("data") or {}).get("editions") or []
+    out = []
+    for raw in raw_eds:
+        ec = _parse_edition(raw)
+        if ec:
+            out.append(ec)
+    return out
+
+
 def pick_best_edition_cover(
     editions: list[EditionCover],
     *,

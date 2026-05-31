@@ -373,3 +373,78 @@ def test_pick_best_edition_cover_aspect_bounds_inclusive():
     # 0.85 ratio: 850x1000
     eds = [_ec(w=850, h=1000)]
     assert pick_best_edition_cover(eds, source_language="en") is not None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_editions_parses_response():
+    from ebook_enricher.hardcover import fetch_editions
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"editions": [
+                {
+                    "id": 30444498,
+                    "edition_format": "ebook",
+                    "image": {"url": "https://x/a.jpg", "width": 2470, "height": 4093},
+                    "language": {"code2": "en"},
+                    "users_count": 29,
+                },
+                {
+                    "id": 30556303,
+                    "edition_format": None,
+                    "image": {"url": "https://x/b.jpg", "width": 325, "height": 500},
+                    "language": {"code2": "en"},
+                    "users_count": 9,
+                },
+                # Edition with no image — should be skipped
+                {
+                    "id": 99999,
+                    "edition_format": "Hardcover",
+                    "image": None,
+                    "language": {"code2": "en"},
+                    "users_count": 1,
+                },
+            ]}
+        }),
+    )
+    result = await fetch_editions(369986, token="fake-token")
+    assert len(result) == 2  # edition with no image is skipped
+    assert result[0].edition_id == 30444498
+    assert result[0].image_width == 2470
+    assert result[0].edition_format == "ebook"
+    assert result[0].language_code == "en"
+    assert result[0].users_count == 29
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_editions_returns_empty_on_error():
+    from ebook_enricher.hardcover import fetch_editions
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(500)
+    )
+    result = await fetch_editions(369986, token="fake-token")
+    assert result == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_editions_handles_missing_language_block():
+    """Some editions have language=None — language_code should be None on the EditionCover."""
+    from ebook_enricher.hardcover import fetch_editions
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"editions": [
+                {
+                    "id": 1,
+                    "edition_format": "ebook",
+                    "image": {"url": "https://x.jpg", "width": 1000, "height": 1500},
+                    "language": None,
+                    "users_count": 5,
+                },
+            ]}
+        }),
+    )
+    result = await fetch_editions(1, token="t")
+    assert len(result) == 1
+    assert result[0].language_code is None
