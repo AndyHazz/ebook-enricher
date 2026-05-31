@@ -201,3 +201,68 @@ async def search_book(title: str, author: str, token: str) -> list[HardcoverBook
             parsed = [_parse_hit(h) for h in hits]
             return [p for p in parsed if p is not None]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Edition cover picker
+# ---------------------------------------------------------------------------
+
+# Aspect-ratio bounds — covers way outside these are likely audiobook
+# squares (~1.0), cinema posters, or scanned thumbnails.
+MIN_COVER_ASPECT = 0.55   # taller end of book covers
+MAX_COVER_ASPECT = 0.85   # squatter end
+
+# Format substrings (case-insensitive) we treat as audio — always unsuitable.
+_AUDIO_FORMAT_MARKERS = ("audio", "audible", "spoken")
+
+
+def _is_audio_format(fmt: Optional[str]) -> bool:
+    if not fmt:
+        return False
+    f = fmt.lower()
+    return any(m in f for m in _AUDIO_FORMAT_MARKERS)
+
+
+def _aspect_ok(w: int, h: int) -> bool:
+    if h <= 0:
+        return False
+    a = w / h
+    return MIN_COVER_ASPECT <= a <= MAX_COVER_ASPECT
+
+
+def pick_best_edition_cover(
+    editions: list[EditionCover],
+    *,
+    source_language: Optional[str] = None,
+    min_width: int = 500,
+) -> Optional[EditionCover]:
+    """Apply the filter chain + pick winner. None if no edition qualifies.
+
+    Filters (in order):
+      1. image_width >= min_width
+      2. aspect ratio (w/h) within [MIN_COVER_ASPECT, MAX_COVER_ASPECT]
+      3. edition_format not containing an audio marker (case-insensitive)
+      4. language matches source (if source_language given AND edition.language_code set)
+         — editions with language_code=None pass through (no filter)
+
+    Tiebreak: largest pixel area first, then highest users_count.
+    """
+    def survives(e: EditionCover) -> bool:
+        if e.image_width < min_width:
+            return False
+        if not _aspect_ok(e.image_width, e.image_height):
+            return False
+        if _is_audio_format(e.edition_format):
+            return False
+        if source_language and e.language_code and e.language_code != source_language:
+            return False
+        return True
+
+    survivors = [e for e in editions if survives(e)]
+    if not survivors:
+        return None
+    survivors.sort(
+        key=lambda e: (e.image_width * e.image_height, e.users_count),
+        reverse=True,
+    )
+    return survivors[0]

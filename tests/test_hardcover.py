@@ -252,3 +252,124 @@ def test_parse_hit_no_image_block():
     assert book.image_url is None
     assert book.image_width is None
     assert book.image_height is None
+
+
+def _ec(*, w, h, fmt="ebook", lang="en", users=10, ed_id=None, url=None):
+    """Test helper to build EditionCover."""
+    from ebook_enricher.hardcover import EditionCover
+    return EditionCover(
+        edition_id=ed_id or (w * 1000 + h),
+        image_url=url or f"https://example/{w}x{h}.jpg",
+        image_width=w,
+        image_height=h,
+        edition_format=fmt,
+        language_code=lang,
+        users_count=users,
+    )
+
+
+def test_pick_best_edition_cover_picks_largest():
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=600, h=900),
+        _ec(w=2000, h=3000),  # largest area
+        _ec(w=1000, h=1500),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 2000
+
+
+def test_pick_best_edition_cover_rejects_audiobook():
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=3000, h=3000, fmt="Audiobook"),  # square audio — rejected
+        _ec(w=1000, h=1500, fmt="ebook"),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 1000
+    assert winner.edition_format == "ebook"
+
+
+def test_pick_best_edition_cover_rejects_audible_format():
+    """edition_format containing 'audible' or 'audio' rejected (case-insensitive)."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=2000, h=3000, fmt="Audible Studios"),
+        _ec(w=600, h=900, fmt="Paperback"),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 600
+
+
+def test_pick_best_edition_cover_rejects_square_aspect():
+    """1500x1500 (1.0 aspect) is outside [0.55, 0.85] → rejected."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=1500, h=1500, fmt="ebook"),   # square (audio art usually)
+        _ec(w=800, h=1200, fmt="ebook"),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 800
+
+
+def test_pick_best_edition_cover_rejects_wrong_language():
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=3000, h=4500, lang="fr"),    # high-res but French
+        _ec(w=800, h=1200, lang="en"),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 800
+
+
+def test_pick_best_edition_cover_allows_unknown_language():
+    """Edition with language_code=None passes the language filter."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=3000, h=4500, lang=None),   # unknown language — should pass
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en")
+    assert winner is not None
+    assert winner.image_width == 3000
+
+
+def test_pick_best_edition_cover_skips_language_filter_when_source_unknown():
+    """If source_language is None (EPUB had no dc:language), don't filter by language."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=3000, h=4500, lang="fr"),
+    ]
+    winner = pick_best_edition_cover(eds, source_language=None)
+    assert winner is not None
+
+
+def test_pick_best_edition_cover_returns_none_when_all_below_min_width():
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    eds = [
+        _ec(w=400, h=600),
+        _ec(w=300, h=450),
+    ]
+    winner = pick_best_edition_cover(eds, source_language="en", min_width=500)
+    assert winner is None
+
+
+def test_pick_best_edition_cover_empty_list_returns_none():
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    winner = pick_best_edition_cover([], source_language="en")
+    assert winner is None
+
+
+def test_pick_best_edition_cover_aspect_bounds_inclusive():
+    """An aspect at exactly 0.55 or 0.85 must pass (inclusive bounds)."""
+    from ebook_enricher.hardcover import pick_best_edition_cover
+    # 0.55 ratio: 550x1000
+    eds = [_ec(w=550, h=1000)]
+    assert pick_best_edition_cover(eds, source_language="en") is not None
+    # 0.85 ratio: 850x1000
+    eds = [_ec(w=850, h=1000)]
+    assert pick_best_edition_cover(eds, source_language="en") is not None
