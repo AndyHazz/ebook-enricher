@@ -1,12 +1,12 @@
 # ebook-enricher
 
-Small HTTP service that enriches EPUB metadata (series name + position, description, genres) using the [Hardcover](https://hardcover.app) GraphQL API. POST a path to an EPUB at the `/enrich` endpoint; it looks the book up on Hardcover and patches the file in place.
+Small HTTP service that enriches EPUB metadata (series name + position, description, genres) and **replaces or adds covers** using the [Hardcover](https://hardcover.app) GraphQL API. POST a path to an EPUB at the `/enrich` endpoint; it looks the book up on Hardcover and patches the file in place.
 
 Runs as a Docker container. The typical use case is wiring it into whatever pipeline puts EPUBs into your library — a file watcher, a Syncthing receive-only folder with an on-change hook, a cron job, or a manual `curl` for one-off enrichment.
 
 ## What it writes, what it doesn't
 
-Only **empty** fields get populated. Title, author, ISBN and cover are never touched — those are usually correct in the EPUB already, and we'd rather not risk churn.
+Only **empty** fields get populated. Title, author and ISBN are never touched — those are usually correct in the EPUB already, and we'd rather not risk churn.
 
 | Hardcover field                          | EPUB target                                         |
 |------------------------------------------|-----------------------------------------------------|
@@ -14,10 +14,38 @@ Only **empty** fields get populated. Title, author, ISBN and cover are never tou
 | `featured_series.position`               | `<meta name="calibre:series_index" content="..."/>` |
 | `description`                            | `<dc:description>`                                  |
 | `genres` (top 5, deduped case-insensitively) | multiple `<dc:subject>` elements                |
+| `image` (with editions fallback)         | EPUB-embedded cover bytes (see Cover replacement below) |
 
 Integer series positions are written as `"1"` not `"1.0"` — Calibre's convention, which KOReader reads verbatim.
 
 If `calibre:series` is already set, the service exits immediately without querying Hardcover. This makes backfill idempotent and leaves any metadata you've manually curated alone.
+
+**File mtime is preserved across the rewrite.** Downstream readers (KOReader bookshelf, Kindle "Recently Added") key their added-date on mtime, so an enrichment pass doesn't artificially jump enriched books to the top of those views.
+
+## Cover replacement
+
+When the enricher matches a book with ≥80% confidence and Hardcover has a cover of sufficient quality, it replaces (or adds) the EPUB's cover during the same atomic rewrite as the metadata update.
+
+Two paths:
+
+- **REPLACE** — EPUB has an existing `<meta name="cover">` declared in OPF. Hardcover's image is fetched, resized to fit Kindle PaperWhite 5 dimensions (longest edge 1648 px, JPEG quality 85), and swapped in. The original cover bytes are preserved as `<book>.original.jpg` next to the EPUB. If the sidecar already exists, it's never overwritten — the sidecar always holds the *true* original.
+
+- **ADD** — EPUB has no cover declared. The enricher mutates the OPF to register a new manifest item + `<meta name="cover"/>` tag, then writes the image bytes at `<opf_dir>/images/cover.jpg` during the same single-pass zip rewrite. No sidecar (nothing to preserve — the original was nothing). A second enrich pass takes the REPLACE path automatically because the OPF now declares the cover.
+
+**Quality gates** (cover replacement only — metadata enrichment proceeds independently):
+
+- Reported image width must be ≥ 500 px (catches placeholder thumbnails).
+- Downloaded payload must be ≥ 50 KB (catches tracking pixels / broken assets).
+
+**Editions fallback.** If the canonical search hit's cover is missing or below the 500 px gate, the enricher queries all editions of the matched book on Hardcover and picks the highest-resolution candidate that passes:
+
+- Width ≥ 500 px and aspect ratio in [0.55, 0.85] (rejects audiobook square art).
+- Not an audio format (rejects audiobook covers regardless of aspect).
+- Language matches the EPUB's `<dc:language>` (primary-subtag comparison — `en` matches `en-US`, `en-GB`, etc.). Editions with no language tag pass through.
+
+Tiebreak: largest pixel area, then most-popular by user count.
+
+If no edition qualifies, the cover swap is skipped — metadata still writes normally. This protects against downgrading a high-resolution publisher cover with a low-resolution Hardcover thumbnail.
 
 ## The fuzzy-match gate
 
@@ -65,7 +93,7 @@ Possible statuses:
 
 | `status`         | Meaning                                                             |
 |------------------|---------------------------------------------------------------------|
-| `enriched`       | Metadata written.                                                   |
+| `enriched`       | Metadata written (cover may or may not have been replaced — see logs). |
 | `skipped`        | `calibre:series` already set; no change made. `reason=already_enriched`. |
 | `no_match`       | Hardcover returned zero hits.                                       |
 | `low_confidence` | Hits returned but none cleared the 80% fuzzy gate.                  |
@@ -73,6 +101,8 @@ Possible statuses:
 | `auth_error`     | GraphQL `errors` array or HTTP 401/403 — token is wrong or expired. |
 | `network_error`  | Can't reach Hardcover, or HTTP 4xx/5xx (non-auth).                  |
 | `error`          | Local issue — file missing, disk full, unexpected exception.        |
+
+Cover replacement is best-effort and **never blocks metadata enrichment** — a failed cover download, an oversized image that won't resize, or an OPF that can't be mutated all log a warning and let the metadata write proceed.
 
 `POST /backfill` — walks `$EBOOKS_PATH` (defaults to `/data/media/ebooks`) and enriches every `*.epub`. 1-second delay between calls to stay under Hardcover's 60 req/min limit. Returns a summary:
 
@@ -128,7 +158,7 @@ pip install -e '.[test]'
 pytest -v
 ```
 
-Test suite is 65 tests across 7 modules. EPUB fixtures are generated programmatically in `tests/conftest.py` — no binary files checked in. Hardcover API calls are mocked with `respx`, no network required.
+Test suite is 145 tests across 8 modules. EPUB fixtures are generated programmatically in `tests/conftest.py` — no binary files checked in. Hardcover API calls are mocked with `respx`, no network required.
 
 ### Code layout
 
@@ -136,8 +166,9 @@ Test suite is 65 tests across 7 modules. EPUB fixtures are generated programmati
 ebook_enricher/
 ├── matcher.py          # Pure fuzzy-match scoring (rapidfuzz)
 ├── epub_meta.py        # EPUB read/write via stdlib zipfile + ElementTree
-├── hardcover.py        # Async GraphQL client (httpx)
-├── enrich.py           # Orchestrator — ties the three above together
+├── hardcover.py        # Async GraphQL client + editions fallback (httpx)
+├── cover.py            # Cover download, resize, sidecar, OPF mutation
+├── enrich.py           # Orchestrator — ties everything together
 ├── server.py           # FastAPI HTTP surface
 ├── status_epub.py      # Generates the status EPUB
 └── status_tracker.py   # Counts consecutive errors, triggers status-EPUB writes
@@ -148,6 +179,6 @@ Each module has at most one external dependency and can be tested in isolation. 
 ## Known limitations
 
 - **Hardcover coverage gaps** for very new, self-published, or non-English titles. The German edition of *Never Flinch* ("Kein Zurück") is what Hardcover indexes primarily — our fuzzy gate correctly rejects it but we end up `low_confidence` rather than enriched.
+- **Hardcover's 500 px image ceiling** — the majority of Hardcover's cover library is bulk-imported and server-side normalised to exactly 500 px height; only user-uploaded covers retain native resolution. The editions fallback exists specifically to find those higher-res user uploads when the canonical hit is a 500 px thumbnail. For some books no higher-res cover exists anywhere on Hardcover and the EPUB's existing publisher cover is the best you'll get.
 - **EPUB 2 `opf:` prefixed attributes** (e.g. `opf:role="aut"` on `dc:creator`) lose their namespace on round-trip because Python's stdlib ElementTree doesn't fully round-trip attribute namespaces. Not a functional issue — EPUB validators accept the result — but worth knowing.
 - **In-memory status counters** don't survive a container restart. If Hardcover has been down for a day and you restart, you'll need three more failures before the status EPUB reappears.
-
