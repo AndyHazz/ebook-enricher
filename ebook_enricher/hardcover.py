@@ -55,6 +55,19 @@ class HardcoverBook:
     image_height: Optional[int] = None
 
 
+@dataclass
+class EditionCover:
+    """One Hardcover edition's cover info — used by the editions-fallback
+    when the canonical search hit's cover is missing or too small."""
+    edition_id: int
+    image_url: str
+    image_width: int
+    image_height: int
+    edition_format: Optional[str]   # "ebook", "Mass Market Paperback", "Audiobook", etc.
+    language_code: Optional[str]    # ISO-639-1 (e.g. "en", "fr"); None if unknown
+    users_count: int                # popularity tiebreak
+
+
 QUERY = """
 query SearchBooks($q: String!, $per_page: Int!) {
   search(query: $q, query_type: "books", per_page: $per_page, page: 1) {
