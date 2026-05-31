@@ -137,6 +137,7 @@ def write_meta(
     path: Path,
     meta: EpubMeta,
     cover_override: Optional[tuple[str, bytes]] = None,
+    cover_add: Optional[bytes] = None,
 ) -> None:
     """Write series, series_index, description, and subjects into the EPUB.
 
@@ -146,8 +147,23 @@ def write_meta(
 
     If `cover_override=(zip_path, bytes)` is provided, the zip member at
     that path is also replaced with the given bytes during the same
-    single-pass rewrite — keeping the operation atomic.
+    single-pass rewrite — keeping the operation atomic. Use this when
+    the OPF already has a manifest entry for a cover (caller resolves
+    the zip path via `cover.find_cover_path_in_opf`).
+
+    If `cover_add=bytes` is provided, the OPF is mutated to register a
+    new cover (manifest item + meta tag) AND the bytes are written to
+    the resolved zip path during the same rewrite. Use this when the
+    OPF has no existing cover. The zip path is determined internally
+    via `cover.add_cover_to_opf`.
+
+    `cover_override` and `cover_add` are mutually exclusive.
     """
+    if cover_override is not None and cover_add is not None:
+        raise ValueError(
+            "cover_override and cover_add are mutually exclusive — "
+            "pass only one"
+        )
     with zipfile.ZipFile(path) as zf:
         opf_path = _find_opf_path(zf)
         root = _parse_opf(zf.read(opf_path))
@@ -169,6 +185,14 @@ def write_meta(
         for subject in meta.subjects:
             el = ET.SubElement(metadata, f"{{{NS['dc']}}}subject")
             el.text = subject
+
+    # ADD-cover path: mutate the OPF tree to register a new manifest
+    # item + cover meta tag BEFORE serializing. The zip path comes back
+    # so the rewrite loop knows where to write the new image bytes.
+    cover_add_zip_path: Optional[str] = None
+    if cover_add is not None:
+        from ebook_enricher import cover as _cover_mod
+        cover_add_zip_path, _href = _cover_mod.add_cover_to_opf(root, opf_path)
 
     new_opf_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -193,6 +217,11 @@ def write_meta(
                                  compress_type=zipfile.ZIP_STORED)
                 else:
                     dst.writestr(item, src.read(item.filename))
+            # ADD-cover path: append the new image at the OPF-resolved
+            # zip path. Done at the end so the file lands at a fresh
+            # offset (not interleaved with the verbatim copies).
+            if cover_add is not None and cover_add_zip_path is not None:
+                dst.writestr(cover_add_zip_path, cover_add)
         # Restore permissions and ownership before the atomic rename.
         os.chmod(tmp_path, orig_stat.st_mode & 0o7777)
         try:

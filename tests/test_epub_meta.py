@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from ebook_enricher.epub_meta import EpubMeta, read_meta, write_meta
 
 
@@ -235,3 +237,53 @@ def test_read_meta_language_none_when_absent(tmp_path):
 
     meta = read_meta(epub)
     assert meta.language is None
+
+
+# ---------- cover_add parameter ----------
+# For EPUBs that have no cover declared in OPF. The enricher uses this
+# path when find_cover_path_in_opf returns None.
+
+def test_write_meta_with_cover_add_inserts_image_into_zip(epub_without_cover):
+    """write_meta(cover_add=bytes) writes the bytes to the EPUB's zip at
+    the canonical OPF-relative location."""
+    import zipfile
+    from ebook_enricher.epub_meta import write_meta
+    img_bytes = b"FAKE_JPEG_BYTES" + b"x" * 1000
+    write_meta(
+        epub_without_cover,
+        EpubMeta(title="", author=""),
+        cover_add=img_bytes,
+    )
+    # Verify the image landed at OEBPS/images/cover.jpg (matches the fixture's OEBPS layout)
+    with zipfile.ZipFile(epub_without_cover) as zf:
+        assert "OEBPS/images/cover.jpg" in zf.namelist()
+        assert zf.read("OEBPS/images/cover.jpg") == img_bytes
+
+
+def test_write_meta_with_cover_add_registers_cover_in_opf(epub_without_cover):
+    """After write_meta with cover_add, the OPF contains the manifest
+    item + meta cover tag (so find_cover_path_in_opf would now succeed)."""
+    from ebook_enricher.epub_meta import write_meta
+    from ebook_enricher import cover
+    img_bytes = b"FAKE_JPEG_BYTES" + b"x" * 1000
+    write_meta(
+        epub_without_cover,
+        EpubMeta(title="", author=""),
+        cover_add=img_bytes,
+    )
+    # find_cover_path_in_opf should now resolve to the same location
+    resolved = cover.find_cover_path_in_opf(epub_without_cover)
+    assert resolved == "OEBPS/images/cover.jpg"
+
+
+def test_write_meta_raises_when_both_cover_override_and_cover_add_passed(bare_epub):
+    """Programmer-error guard. Two ways to inject a cover at once = a bug
+    somewhere upstream; fail loud."""
+    from ebook_enricher.epub_meta import write_meta
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        write_meta(
+            bare_epub,
+            EpubMeta(title="", author=""),
+            cover_override=("OEBPS/images/cover.jpg", b"x"),
+            cover_add=b"x",
+        )

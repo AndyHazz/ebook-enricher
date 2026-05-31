@@ -150,26 +150,41 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
                 chosen.id,
             )
 
-    # Prepare cover override (best-effort — failures here never block
-    # metadata enrichment).
+    # Prepare cover override OR cover add (best-effort — failures here
+    # never block metadata enrichment).
+    #
+    # REPLACE path: EPUB already has a cover declared in OPF. Swap the
+    # bytes at that path; preserve the original via .original.jpg
+    # sidecar before overwriting.
+    #
+    # ADD path: EPUB has no cover declared. Add a fresh manifest item
+    # + meta tag + image bytes at OEBPS/images/cover.jpg (or root-level
+    # depending on OPF location). No sidecar — the "original" was
+    # nothing, and preserving nothing is meaningless. Idempotent: a
+    # second enrich pass takes the REPLACE path because the OPF now
+    # has a cover declared.
     cover_override = None
+    cover_add = None
     if candidate_url and (
         candidate_width is None
         or candidate_width >= cover.MIN_COVER_WIDTH
     ):
-        existing_cover_path = cover.find_cover_path_in_opf(path)
-        if existing_cover_path:
-            cover_bytes = await cover.download_cover(candidate_url)
-            if cover_bytes:
-                cover_bytes = cover.resize_cover_if_needed(cover_bytes)
-                saved = cover.save_sidecar_if_absent(path)
-                if saved:
+        cover_bytes = await cover.download_cover(candidate_url)
+        if cover_bytes:
+            cover_bytes = cover.resize_cover_if_needed(cover_bytes)
+            existing_cover_path = cover.find_cover_path_in_opf(path)
+            if existing_cover_path:
+                # REPLACE
+                if cover.save_sidecar_if_absent(path):
                     cover_override = (existing_cover_path, cover_bytes)
                 # else: sidecar save failed — skip the swap to avoid
                 # losing the only original.
+            else:
+                # ADD — no sidecar
+                cover_add = cover_bytes
 
     try:
-        write_meta(path, updates, cover_override=cover_override)
+        write_meta(path, updates, cover_override=cover_override, cover_add=cover_add)
     except Exception as e:
         logger.exception("Failed to write EPUB %s", path)
         return EnrichResult(status="error", reason=f"write_failed: {e}")

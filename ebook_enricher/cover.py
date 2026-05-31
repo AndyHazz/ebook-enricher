@@ -169,6 +169,66 @@ MAX_COVER_LONG_EDGE = 1648  # PW5's larger display dimension at native 300dpi
 JPEG_QUALITY = 85
 
 
+DEFAULT_COVER_HREF = "images/cover.jpg"          # path INSIDE OPF dir
+DEFAULT_COVER_MANIFEST_ID = "cover-image"
+DEFAULT_COVER_MEDIA_TYPE = "image/jpeg"
+
+
+def add_cover_to_opf(opf_root, opf_path: str) -> tuple[str, str]:
+    """Mutate an OPF tree IN PLACE to register a new cover image, returning
+    `(cover_zip_path, cover_href)`.
+
+    Appends:
+      * `<item id="cover-image" href="images/cover.jpg" media-type="image/jpeg"/>`
+        to the existing `<manifest>`.
+      * `<meta name="cover" content="cover-image"/>` to the existing
+        `<metadata>`.
+
+    The caller (write_meta) writes the cover bytes to `cover_zip_path`
+    during the same atomic zip rewrite.
+
+    Raises:
+      ValueError if `<metadata>` or `<manifest>` is absent.
+      ValueError if a manifest item with id="cover-image" already exists
+      (the caller should have taken the REPLACE path).
+    """
+    metadata = opf_root.find(f"{{{_NS['opf']}}}metadata")
+    if metadata is None:
+        raise ValueError("OPF has no <metadata> element; cannot register cover")
+    manifest = opf_root.find(f"{{{_NS['opf']}}}manifest")
+    if manifest is None:
+        raise ValueError("OPF has no <manifest> element; cannot register cover")
+
+    # Collision guard: if id=cover-image already exists, the EPUB already
+    # has *some* cover registration and we should have taken REPLACE.
+    for item in manifest.findall(f"{{{_NS['opf']}}}item"):
+        if item.get("id") == DEFAULT_COVER_MANIFEST_ID:
+            raise ValueError(
+                f"manifest item with id='{DEFAULT_COVER_MANIFEST_ID}' already exists; "
+                "caller should use cover_override (REPLACE) instead of cover_add"
+            )
+
+    # Append manifest item
+    import xml.etree.ElementTree as _ET   # std lib; defusedxml only secures parsing
+    item = _ET.SubElement(manifest, f"{{{_NS['opf']}}}item")
+    item.set("id", DEFAULT_COVER_MANIFEST_ID)
+    item.set("href", DEFAULT_COVER_HREF)
+    item.set("media-type", DEFAULT_COVER_MEDIA_TYPE)
+
+    # Append meta tag inside metadata
+    meta = _ET.SubElement(metadata, f"{{{_NS['opf']}}}meta")
+    meta.set("name", "cover")
+    meta.set("content", DEFAULT_COVER_MANIFEST_ID)
+
+    # Resolve the zip path: OPF's dir + the href
+    opf_dir = str(Path(opf_path).parent)
+    if opf_dir and opf_dir != ".":
+        zip_path = f"{opf_dir}/{DEFAULT_COVER_HREF}"
+    else:
+        zip_path = DEFAULT_COVER_HREF
+    return zip_path, DEFAULT_COVER_HREF
+
+
 def resize_cover_if_needed(image_bytes: bytes) -> bytes:
     """If the image's longest edge exceeds MAX_COVER_LONG_EDGE, downscale
     (preserving aspect ratio) and re-encode as JPEG quality 85. Otherwise

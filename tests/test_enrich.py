@@ -390,11 +390,15 @@ async def test_enrich_skips_cover_when_download_fails(epub_with_cover):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_enrich_skips_cover_when_epub_lacks_cover_meta(epub_without_cover):
-    """EPUB has no <meta name="cover"> → metadata written, no cover swap,
-    no sidecar. Cover download not even attempted."""
+async def test_enrich_adds_cover_when_epub_lacks_cover_meta(epub_without_cover):
+    """EPUB has no <meta name="cover"> → enricher ADDS one: bytes land at
+    OEBPS/images/cover.jpg, OPF gets a manifest item + meta tag. No
+    sidecar (nothing to preserve)."""
     from ebook_enricher.enrich import enrich_file
+    from ebook_enricher import cover
+    import zipfile
 
+    new_cover_bytes = b"NEW_COVER_FOR_NO_COVER_EPUB" + b"x" * 80_000
     cover_url = "https://assets.hardcover.app/edition/1/new.jpg"
     respx.post("https://api.hardcover.app/v1/graphql").mock(
         return_value=httpx.Response(200, json={
@@ -410,12 +414,24 @@ async def test_enrich_skips_cover_when_epub_lacks_cover_meta(epub_without_cover)
             }]}}}
         }),
     )
-    # Cover download endpoint is NOT mocked — if the code tries to hit it,
-    # respx will raise. We assert that doesn't happen.
+    respx.get(cover_url).mock(
+        return_value=httpx.Response(200, content=new_cover_bytes)
+    )
 
     result = await enrich_file(epub_without_cover, token="fake-token")
     assert result.status == "enriched"
 
+    # Cover bytes inside the zip at the canonical add location
+    with zipfile.ZipFile(epub_without_cover) as zf:
+        assert "OEBPS/images/cover.jpg" in zf.namelist()
+        # resize may have re-encoded the bytes if image was decodable;
+        # our fake bytes aren't a real JPEG so resize is a no-op.
+        assert zf.read("OEBPS/images/cover.jpg") == new_cover_bytes
+
+    # OPF now resolves the cover via the standard lookup
+    assert cover.find_cover_path_in_opf(epub_without_cover) == "OEBPS/images/cover.jpg"
+
+    # No sidecar — original was "nothing", nothing to preserve
     sidecar = epub_without_cover.parent / (epub_without_cover.stem + ".original.jpg")
     assert not sidecar.exists()
 

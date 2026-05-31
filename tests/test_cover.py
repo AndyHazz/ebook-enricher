@@ -150,3 +150,88 @@ def test_resize_returns_original_on_decode_failure():
     garbage = b"this is not a jpeg at all"
     result = cover.resize_cover_if_needed(garbage)
     assert result == garbage
+
+
+# ---------- add_cover_to_opf ----------
+# Pure OPF tree mutation: appends manifest item + meta cover tag for the
+# "EPUB has no cover" case. Used by enrich.py when find_cover_path_in_opf
+# returns None.
+
+import defusedxml.ElementTree as ET
+
+_OPF_NS = "http://www.idpf.org/2007/opf"
+_DC_NS  = "http://purl.org/dc/elements/1.1/"
+
+
+def _make_opf_root(have_metadata: bool = True, have_manifest: bool = True, extra_items: str = "") -> ET.Element:
+    """Build an OPF tree fragment. Knobs let tests omit metadata or manifest
+    to verify error paths."""
+    meta_block = (
+        f'<metadata xmlns:dc="{_DC_NS}">'
+        '<dc:title>X</dc:title>'
+        '</metadata>'
+    ) if have_metadata else ""
+    manifest_block = (
+        '<manifest>'
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"/>'
+        f'{extra_items}'
+        '</manifest>'
+    ) if have_manifest else ""
+    src = (
+        f'<package xmlns="{_OPF_NS}" version="3.0" unique-identifier="uid">'
+        f'{meta_block}{manifest_block}'
+        '</package>'
+    )
+    return ET.fromstring(src)
+
+
+def test_add_cover_to_opf_inserts_manifest_item_and_meta_tag():
+    """Happy path: a fresh OPF gets <item id=cover-image .../> in the manifest
+    and <meta name=cover content=cover-image/> in metadata."""
+    root = _make_opf_root()
+    zip_path, href = cover.add_cover_to_opf(root, "OEBPS/Content.opf")
+    assert zip_path == "OEBPS/images/cover.jpg"
+    assert href == "images/cover.jpg"
+    # Manifest item present
+    NS = {"opf": _OPF_NS}
+    items = root.find("opf:manifest", NS).findall("opf:item", NS)
+    cover_items = [i for i in items if i.get("id") == "cover-image"]
+    assert len(cover_items) == 1
+    assert cover_items[0].get("href") == "images/cover.jpg"
+    assert cover_items[0].get("media-type") == "image/jpeg"
+    # Meta tag present
+    metas = root.find("opf:metadata", NS).findall("opf:meta", NS)
+    cover_metas = [m for m in metas if m.get("name") == "cover"]
+    assert len(cover_metas) == 1
+    assert cover_metas[0].get("content") == "cover-image"
+
+
+def test_add_cover_to_opf_uses_root_layout_when_opf_at_zip_root():
+    """OPF at root (no subdir) → zip path is plain 'images/cover.jpg'."""
+    root = _make_opf_root()
+    zip_path, href = cover.add_cover_to_opf(root, "content.opf")
+    assert zip_path == "images/cover.jpg"
+    assert href == "images/cover.jpg"
+
+
+def test_add_cover_to_opf_raises_when_metadata_missing():
+    """Defensive: malformed OPF without <metadata> can't be safely mutated."""
+    root = _make_opf_root(have_metadata=False)
+    with pytest.raises(ValueError, match="metadata"):
+        cover.add_cover_to_opf(root, "OEBPS/Content.opf")
+
+
+def test_add_cover_to_opf_raises_when_manifest_missing():
+    """Defensive: malformed OPF without <manifest> can't register the cover."""
+    root = _make_opf_root(have_manifest=False)
+    with pytest.raises(ValueError, match="manifest"):
+        cover.add_cover_to_opf(root, "OEBPS/Content.opf")
+
+
+def test_add_cover_to_opf_raises_when_cover_id_collides():
+    """Defensive: if id=cover-image already exists, caller should have taken
+    the REPLACE path instead. Loud failure is better than silent corruption
+    (two items with same id)."""
+    root = _make_opf_root(extra_items='<item id="cover-image" href="old.jpg" media-type="image/jpeg"/>')
+    with pytest.raises(ValueError, match="cover-image"):
+        cover.add_cover_to_opf(root, "OEBPS/Content.opf")
