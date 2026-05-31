@@ -36,6 +36,7 @@ class EpubMeta:
     series_index: Optional[str] = None
     description: Optional[str] = None
     subjects: list[str] = field(default_factory=list)
+    language: Optional[str] = None
 
 
 def _find_opf_path(zf: zipfile.ZipFile) -> str:
@@ -73,6 +74,9 @@ def read_meta(path: Path) -> EpubMeta:
         if s.text and s.text.strip()
     ]
 
+    lang_el = metadata.find("dc:language", NS)
+    language = lang_el.text.strip() if lang_el is not None and lang_el.text else None
+
     series = None
     series_index = None
     for meta in metadata.findall("opf:meta", NS):
@@ -93,6 +97,7 @@ def read_meta(path: Path) -> EpubMeta:
         series_index=series_index,
         description=description,
         subjects=subjects,
+        language=language,
     )
 
 

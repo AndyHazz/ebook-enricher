@@ -148,3 +148,65 @@ def test_write_meta_without_cover_override_leaves_cover(epub_with_cover):
     write_meta(epub_with_cover, meta)  # no cover_override
     with zipfile.ZipFile(epub_with_cover) as zf:
         assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL
+
+
+def test_read_meta_extracts_language(tmp_path):
+    """read_meta returns the dc:language from OPF as meta.language."""
+    import zipfile
+    from ebook_enricher.epub_meta import read_meta
+    from tests.conftest import MIMETYPE, CONTAINER_XML, NAV_XHTML
+
+    # Build a minimal EPUB with dc:language = "en"
+    opf = '''<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">test-uid</dc:identifier>
+    <dc:title>Test</dc:title>
+    <dc:creator>Author</dc:creator>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine><itemref idref="nav"/></spine>
+</package>
+'''
+    epub = tmp_path / "lang_test.epub"
+    with zipfile.ZipFile(epub, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+
+    meta = read_meta(epub)
+    assert meta.language == "en"
+
+
+def test_read_meta_language_none_when_absent(tmp_path):
+    """When OPF has no dc:language, meta.language is None."""
+    import zipfile
+    from ebook_enricher.epub_meta import read_meta
+    from tests.conftest import MIMETYPE, CONTAINER_XML, NAV_XHTML
+
+    epub = tmp_path / "no_lang.epub"
+    opf = '''<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">test-uid</dc:identifier>
+    <dc:title>Test</dc:title>
+    <dc:creator>Author</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine><itemref idref="nav"/></spine>
+</package>
+'''
+    with zipfile.ZipFile(epub, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+
+    meta = read_meta(epub)
+    assert meta.language is None

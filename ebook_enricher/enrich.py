@@ -138,7 +138,7 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         editions = await hardcover.fetch_editions(int(chosen.id), token=token)
         best = hardcover.pick_best_edition_cover(
             editions,
-            source_language=None,
+            source_language=meta.language,
             min_width=cover.MIN_COVER_WIDTH,
         )
         if best:
