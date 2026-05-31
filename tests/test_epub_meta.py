@@ -117,6 +117,31 @@ def test_write_preserves_file_mode(bare_epub: Path, tmp_path: Path):
     assert mode == 0o664, f"Expected 0o664, got {oct(mode)}"
 
 
+def test_write_preserves_mtime(bare_epub: Path):
+    # The enricher rewrites the EPUB to inject metadata + cover. Without
+    # mtime preservation, the rewrite bumps mtime to "now" and the file
+    # jumps to the top of every Recently-Added view on downstream
+    # devices (KOReader, Kindle). Capture the original mtime, write,
+    # then assert it survived the atomic rename.
+    import os
+    orig_stat = bare_epub.stat()
+    # Move mtime back to a known past value so we'd notice clearly if
+    # write_meta clobbered it back to "now".
+    past_atime = orig_stat.st_atime_ns - 7 * 24 * 3600 * 1_000_000_000
+    past_mtime = orig_stat.st_mtime_ns - 7 * 24 * 3600 * 1_000_000_000
+    os.utime(bare_epub, ns=(past_atime, past_mtime))
+
+    write_meta(
+        bare_epub,
+        EpubMeta(title="", author="", series="A Series", series_index="1"),
+    )
+
+    after = bare_epub.stat()
+    assert after.st_mtime_ns == past_mtime, (
+        f"mtime not preserved: expected {past_mtime}, got {after.st_mtime_ns}"
+    )
+
+
 def test_write_meta_with_cover_override_replaces_cover_bytes(epub_with_cover):
     """cover_override=(zip_path, new_bytes) replaces that file's bytes
     in the EPUB during the single-pass rewrite."""

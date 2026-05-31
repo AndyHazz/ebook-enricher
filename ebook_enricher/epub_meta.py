@@ -202,6 +202,11 @@ def write_meta(
             # because the file is created by the same user that owns path.
             pass
         shutil.move(tmp_path, path)
+        # Preserve mtime so the enriched file doesn't jump to the top of
+        # downstream "recently added" views (KOReader/Kindle shelves use
+        # mtime as the added-key). Done after the rename — utime targets
+        # the final path. Nanosecond precision avoids rounding drift.
+        os.utime(path, ns=(orig_stat.st_atime_ns, orig_stat.st_mtime_ns))
     except Exception:
         Path(tmp_path).unlink(missing_ok=True)
         raise
