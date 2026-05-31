@@ -423,15 +423,17 @@ async def test_enrich_skips_cover_when_epub_lacks_cover_meta(epub_without_cover)
 @pytest.mark.asyncio
 @respx.mock
 async def test_enrich_skips_cover_when_image_too_small(epub_with_cover):
-    """Hardcover hit with image_width < MIN_COVER_WIDTH → skip cover swap.
+    """Hardcover hit with image_width < MIN_COVER_WIDTH → editions fallback
+    called but returns nothing → skip cover swap.
     The download endpoint is NOT mocked; if reached, respx raises."""
     from ebook_enricher.enrich import enrich_file
     from tests.conftest import COVER_BYTES_ORIGINAL
     import zipfile
 
     cover_url = "https://assets.hardcover.app/edition/1/thumbnail.jpg"
-    respx.post("https://api.hardcover.app/v1/graphql").mock(
-        return_value=httpx.Response(200, json={
+    respx.post("https://api.hardcover.app/v1/graphql").mock(side_effect=[
+        # search()
+        httpx.Response(200, json={
             "data": {"search": {"results": {"hits": [{
                 "document": {
                     "id": 1,
@@ -443,7 +445,9 @@ async def test_enrich_skips_cover_when_image_too_small(epub_with_cover):
                 }
             }]}}}
         }),
-    )
+        # editions() — returns empty → no winner
+        httpx.Response(200, json={"data": {"editions": []}}),
+    ])
     # Cover download URL deliberately NOT mocked — if code reaches it, respx raises.
 
     result = await enrich_file(epub_with_cover, token="fake-token")
@@ -454,6 +458,148 @@ async def test_enrich_skips_cover_when_image_too_small(epub_with_cover):
         assert zf.read("OEBPS/images/cover.jpg") == COVER_BYTES_ORIGINAL
     sidecar = epub_with_cover.parent / (epub_with_cover.stem + ".original.jpg")
     assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_uses_editions_fallback_when_canonical_too_small(epub_with_cover):
+    """Top search hit has width<500. Editions fallback finds a 2000x3000
+    ebook. Cover gets swapped from the editions URL."""
+    from ebook_enricher.enrich import enrich_file
+    from io import BytesIO
+    from PIL import Image
+    import zipfile
+
+    small_url = "https://assets.hardcover.app/small.jpg"
+    big_url = "https://assets.hardcover.app/big.jpg"
+    big_img = Image.new("RGB", (2000, 3000), (10, 200, 30))
+    big_bytes_buf = BytesIO()
+    big_img.save(big_bytes_buf, format="JPEG", quality=90)
+    big_bytes = big_bytes_buf.getvalue()
+
+    respx.post("https://api.hardcover.app/v1/graphql").mock(side_effect=[
+        # First call: search()
+        httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 123,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "desc",
+                    "featured_series": {"series": {"name": "TS"}, "position": 1},
+                    "image": {"url": small_url, "width": 325, "height": 500},
+                }
+            }]}}}
+        }),
+        # Second call: editions()
+        httpx.Response(200, json={
+            "data": {"editions": [
+                {
+                    "id": 9999,
+                    "edition_format": "ebook",
+                    "image": {"url": big_url, "width": 2000, "height": 3000},
+                    "language": {"code2": "en"},
+                    "users_count": 50,
+                },
+            ]}
+        }),
+    ])
+    respx.get(big_url).mock(return_value=httpx.Response(200, content=big_bytes))
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        published = zf.read("OEBPS/images/cover.jpg")
+    img = Image.open(BytesIO(published))
+    from ebook_enricher.cover import MAX_COVER_LONG_EDGE
+    assert max(img.size) == MAX_COVER_LONG_EDGE
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_skips_fallback_when_canonical_is_large_enough(epub_with_cover):
+    """Canonical width >= MIN_COVER_WIDTH → editions endpoint NOT called.
+    Cover swap uses the canonical image URL."""
+    from ebook_enricher.enrich import enrich_file
+    from io import BytesIO
+    from PIL import Image
+    import zipfile
+
+    good_url = "https://assets.hardcover.app/good.jpg"
+    big_img = Image.new("RGB", (1500, 2400), (200, 50, 50))
+    big_buf = BytesIO()
+    big_img.save(big_buf, format="JPEG", quality=90)
+    big_bytes = big_buf.getvalue()
+
+    # Only the search call is mocked. If editions is called, respx raises.
+    respx.post("https://api.hardcover.app/v1/graphql").mock(
+        return_value=httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 456,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "desc",
+                    "featured_series": {"series": {"name": "TS"}, "position": 1},
+                    "image": {"url": good_url, "width": 1500, "height": 2400},
+                }
+            }]}}}
+        }),
+    )
+    respx.get(good_url).mock(return_value=httpx.Response(200, content=big_bytes))
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        published = zf.read("OEBPS/images/cover.jpg")
+    assert len(published) > 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_fallback_returns_no_winner_skips_cover(epub_with_cover):
+    """Canonical too small, editions all rejected → metadata writes, no cover swap."""
+    from ebook_enricher.enrich import enrich_file
+    from tests.conftest import COVER_BYTES_ORIGINAL
+    import zipfile
+
+    respx.post("https://api.hardcover.app/v1/graphql").mock(side_effect=[
+        # search()
+        httpx.Response(200, json={
+            "data": {"search": {"results": {"hits": [{
+                "document": {
+                    "id": 789,
+                    "title": "Test Book Title",
+                    "author_names": ["Test Author"],
+                    "description": "desc",
+                    "featured_series": {"series": {"name": "TS"}, "position": 1},
+                    "image": {"url": "https://small.jpg", "width": 300, "height": 450},
+                }
+            }]}}}
+        }),
+        # editions() — all too small
+        httpx.Response(200, json={
+            "data": {"editions": [
+                {
+                    "id": 1,
+                    "edition_format": "Mass Market Paperback",
+                    "image": {"url": "https://tiny.jpg", "width": 300, "height": 450},
+                    "language": {"code2": "en"},
+                    "users_count": 5,
+                },
+            ]}
+        }),
+    ])
+    # No cover URL is mocked — if download is attempted, respx raises.
+
+    result = await enrich_file(epub_with_cover, token="fake-token")
+    assert result.status == "enriched"
+
+    with zipfile.ZipFile(epub_with_cover) as zf:
+        published = zf.read("OEBPS/images/cover.jpg")
+    assert published == COVER_BYTES_ORIGINAL  # unchanged
 
 
 @pytest.mark.asyncio

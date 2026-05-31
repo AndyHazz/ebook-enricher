@@ -21,7 +21,7 @@ Status = Literal[
 
 import httpx
 
-from ebook_enricher import cover
+from ebook_enricher import cover, hardcover
 from ebook_enricher.epub_meta import EpubMeta, read_meta, write_meta
 from ebook_enricher.hardcover import (
     HardcoverAuthError,
@@ -126,15 +126,40 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
     if not meta.subjects and chosen.genres:
         updates.subjects = chosen.genres
 
+    # Determine which image URL to use for cover replacement.
+    # If the canonical search hit's image is missing or too small, fall
+    # back to scanning the book's editions for a higher-resolution alt.
+    candidate_url = chosen.image_url
+    candidate_width = chosen.image_width
+    if not candidate_url or (
+        candidate_width is not None
+        and candidate_width < cover.MIN_COVER_WIDTH
+    ):
+        editions = await hardcover.fetch_editions(int(chosen.id), token=token)
+        best = hardcover.pick_best_edition_cover(
+            editions,
+            source_language=None,
+            min_width=cover.MIN_COVER_WIDTH,
+        )
+        if best:
+            candidate_url = best.image_url
+            candidate_width = best.image_width
+            logger.info(
+                "editions fallback: using ed_id=%d (%dx%d) for book_id=%s",
+                best.edition_id, best.image_width, best.image_height,
+                chosen.id,
+            )
+
     # Prepare cover override (best-effort — failures here never block
     # metadata enrichment).
     cover_override = None
-    if chosen.image_url and (
-        chosen.image_width is None or chosen.image_width >= cover.MIN_COVER_WIDTH
+    if candidate_url and (
+        candidate_width is None
+        or candidate_width >= cover.MIN_COVER_WIDTH
     ):
         existing_cover_path = cover.find_cover_path_in_opf(path)
         if existing_cover_path:
-            cover_bytes = await cover.download_cover(chosen.image_url)
+            cover_bytes = await cover.download_cover(candidate_url)
             if cover_bytes:
                 cover_bytes = cover.resize_cover_if_needed(cover_bytes)
                 saved = cover.save_sidecar_if_absent(path)
