@@ -14,6 +14,9 @@ CONTENT_PATH="$3"
 SYNC_BASE="/data/media/ebooks"
 SEED_BASE="/data/torrents/ebooks"
 ENRICHER_URL="http://ebook-enricher:8000/enrich"
+# Copy-once ledger lives in /config (qBittorrent's persistent bind mount),
+# deliberately OUTSIDE the synced tree so it never propagates to devices.
+LEDGER_PATH="/config/published-ledger.json"
 
 case "$TAGS" in
     *ebook*) ;;
@@ -29,4 +32,5 @@ exec python3 /config/process-ebook.py \
     --source "$CONTENT_PATH" \
     --save-path "$SAVE_PATH" \
     --sync-base "$SYNC_BASE" \
-    --enricher-url "$ENRICHER_URL"
+    --enricher-url "$ENRICHER_URL" \
+    --ledger-path "$LEDGER_PATH"

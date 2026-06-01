@@ -413,8 +413,8 @@ def test_skips_publish_when_dest_exists(tmp_path, mock_enricher):
     assert dest_epub.read_bytes() == b"MANUALLY-CURATED-DO-NOT-CLOBBER"
     # Enricher was never called (nothing to enrich)
     assert len(_MockEnricherHandler.received_paths) == 0
-    # Skip is logged
-    assert "skip" in result.stdout.lower() and "already published" in result.stdout.lower()
+    # Skip is logged (dest present, not yet in ledger -> backfill-record)
+    assert "skip" in result.stdout.lower()
 
 
 def test_passthrough_skips_when_dest_exists(tmp_path, mock_enricher):
@@ -535,3 +535,96 @@ def test_sidecar_relocated_alongside_dest(tmp_path, sidecar_enricher):
     staging = sync / ".staging"
     orphans = list(staging.glob("*.original.jpg")) if staging.exists() else []
     assert orphans == [], f"staging orphans left behind: {orphans}"
+
+
+# --------------------------------------------------------------------------
+# Copy-once ledger: a published book is recorded permanently. Deleting or
+# renaming it on the sync side must NOT cause a re-copy on the next run.
+# Keyed by torrent-relative path. Ledger lives outside the sync folder.
+# --------------------------------------------------------------------------
+
+def _run(content, save, sync, enricher, ledger, *extra):
+    return subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", enricher,
+            "--ledger-path", str(ledger),
+            *extra,
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+
+
+def test_copy_once_deleted_dest_not_republished(tmp_path, mock_enricher):
+    """Publish once, delete the dest, run again — the book is NOT
+    resurrected because the ledger remembers it was published."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"; sync.mkdir()
+    ledger = tmp_path / "published-ledger.json"
+
+    r1 = _run(content, save, sync, mock_enricher, ledger)
+    assert r1.returncode == 0, r1.stderr
+    dest = sync / "Ready Player One" / "Ready Player One.epub"
+    assert dest.exists()
+
+    # User deletes the book from the sync folder
+    import shutil as _sh
+    _sh.rmtree(sync / "Ready Player One")
+    assert not dest.exists()
+
+    # Torrent recheck re-fires the autorun
+    r2 = _run(content, save, sync, mock_enricher, ledger)
+    assert r2.returncode == 0, r2.stderr
+    assert not dest.exists(), "deleted book must NOT be resurrected"
+    assert "already published" in r2.stdout.lower()
+
+
+def test_ledger_backfills_preexisting_dest(tmp_path, mock_enricher):
+    """A book already present at the dest but not yet in the ledger is
+    recorded (backfill), so deleting it afterwards still won't resurrect."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"; sync.mkdir()
+    ledger = tmp_path / "published-ledger.json"
+    # Pre-existing library copy, ledger empty
+    dest_dir = sync / "Ready Player One"; dest_dir.mkdir(parents=True)
+    (dest_dir / "Ready Player One.epub").write_bytes(b"PREEXISTING")
+
+    # First run: dest exists, not in ledger -> skip + record
+    _run(content, save, sync, mock_enricher, ledger)
+    import json as _j
+    recorded = _j.loads(ledger.read_text())
+    assert any("Ready Player One.epub" in k for k in recorded), recorded
+
+    # Delete + re-run: must stay gone
+    (dest_dir / "Ready Player One.epub").unlink()
+    _run(content, save, sync, mock_enricher, ledger)
+    assert not (dest_dir / "Ready Player One.epub").exists()
+
+
+def test_overwrite_republishes_even_when_in_ledger(tmp_path, mock_enricher):
+    """--overwrite bypasses the ledger and republishes (escape hatch)."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"; sync.mkdir()
+    ledger = tmp_path / "published-ledger.json"
+    _run(content, save, sync, mock_enricher, ledger)
+    dest = sync / "Ready Player One" / "Ready Player One.epub"
+    dest.write_bytes(b"LOCAL-EDIT")
+
+    _run(content, save, sync, mock_enricher, ledger, "--overwrite")
+    assert dest.read_bytes() == b"epub-bytes-ENRICHED"
+
+
+def test_ledger_file_created_and_persisted(tmp_path, mock_enricher):
+    """The ledger JSON is written and contains the published key."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"; sync.mkdir()
+    ledger = tmp_path / "published-ledger.json"
+    _run(content, save, sync, mock_enricher, ledger)
+    assert ledger.exists()
+    import json as _j
+    keys = _j.loads(ledger.read_text())
+    assert any("Ready Player One.epub" in k for k in keys)

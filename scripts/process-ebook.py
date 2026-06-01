@@ -201,6 +201,30 @@ def _sweep_staging(staging_dir: Path, max_age_s: int = 86_400) -> None:
                 pass
 
 
+def _load_ledger(ledger_path: Path) -> set[str]:
+    """Load the copy-once ledger — the set of torrent-relative paths that
+    have ever been published. Returns an empty set if the file is missing
+    or unreadable (a corrupt ledger must not block publishing entirely)."""
+    try:
+        with open(ledger_path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return set(data)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return set()
+
+
+def _save_ledger(ledger_path: Path, ledger: set[str]) -> None:
+    """Write the ledger atomically (temp file + rename) so a crash mid-write
+    can't truncate it. Sorted for stable diffs / human readability."""
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ledger_path.with_suffix(ledger_path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(sorted(ledger), f, indent=0)
+    os.replace(tmp, ledger_path)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", type=Path, required=True)
@@ -212,8 +236,16 @@ def main() -> int:
     ap.add_argument(
         "--overwrite",
         action="store_true",
-        help="republish even if the destination already exists "
-             "(default: skip already-published files to protect manual edits)",
+        help="republish even if already published per the ledger / present "
+             "at dest (escape hatch; also re-records in the ledger)",
+    )
+    ap.add_argument(
+        "--ledger-path",
+        type=Path,
+        default=None,
+        help="JSON copy-once ledger of torrent-relative paths ever published. "
+             "Default: <sync-base>/.published-ledger.json. Keep it OUTSIDE "
+             "the synced tree in production so it doesn't propagate to devices.",
     )
     args = ap.parse_args()
 
@@ -240,31 +272,53 @@ def main() -> int:
     staging_dir = args.sync_base / args.staging_subdir
     _sweep_staging(staging_dir)
 
+    ledger_path = args.ledger_path or (args.sync_base / ".published-ledger.json")
+    ledger = _load_ledger(ledger_path)
+
     ebook_jobs, passthrough_jobs = plan_actions(
         args.source, args.save_path, args.sync_base
     )
 
-    # Idempotency: skip jobs whose destination already exists, unless
-    # --overwrite. A static library torrent that gets rechecked or
-    # re-announced re-fires this autorun over its WHOLE content; without
-    # this guard, every already-published book is rebuilt from the seed
-    # and re-enriched, clobbering any manual cover/metadata curation on
-    # the library copy (the seed is never updated, so the rebuild always
-    # loses those edits). New books still publish normally because their
-    # dest doesn't exist yet.
-    if not args.overwrite:
-        kept_ebooks, kept_passthrough = [], []
-        for keeper, dest, losers in ebook_jobs:
-            if dest.exists():
-                print(f"skip (already published): {dest}")
-            else:
-                kept_ebooks.append((keeper, dest, losers))
-        for src, dest in passthrough_jobs:
-            if dest.exists():
-                print(f"skip (already published): {dest}")
-            else:
-                kept_passthrough.append((src, dest))
-        ebook_jobs, passthrough_jobs = kept_ebooks, kept_passthrough
+    # Copy-once ledger. A book is keyed by its torrent-relative path and
+    # published exactly once, ever. The ledger is consulted regardless of
+    # whether the dest currently exists, so deleting / renaming / moving a
+    # book on the sync side is permanent — a later torrent recheck (which
+    # re-fires this autorun over the WHOLE torrent content) will NOT
+    # resurrect it. Three outcomes per candidate:
+    #
+    #   in ledger          -> skip (copy-once; honours deletes/renames)
+    #   not in ledger, but
+    #     dest exists       -> skip + record (backfill: it's already here,
+    #                          so treat it as published — covers the
+    #                          existing library on first run after deploy)
+    #     dest missing      -> publish + record (genuinely new book)
+    #
+    # --overwrite bypasses both checks and re-records.
+    def _rel(p: Path) -> str:
+        return str(p.relative_to(args.save_path))
+
+    kept_ebooks, kept_passthrough = [], []
+    for keeper, dest, losers in ebook_jobs:
+        key = _rel(keeper)
+        if not args.overwrite and key in ledger:
+            print(f"skip (copy-once, already published): {key}")
+        elif not args.overwrite and dest.exists():
+            print(f"skip (already present, recording): {key}")
+            ledger.add(key)
+        else:
+            kept_ebooks.append((keeper, dest, losers))
+            ledger.add(key)
+    for src, dest in passthrough_jobs:
+        key = _rel(src)
+        if not args.overwrite and key in ledger:
+            print(f"skip (copy-once, already published): {key}")
+        elif not args.overwrite and dest.exists():
+            print(f"skip (already present, recording): {key}")
+            ledger.add(key)
+        else:
+            kept_passthrough.append((src, dest))
+            ledger.add(key)
+    ebook_jobs, passthrough_jobs = kept_ebooks, kept_passthrough
 
     for keeper, dest, losers in ebook_jobs:
         print(f"keep: {keeper.name} -> {dest}")
@@ -280,6 +334,8 @@ def main() -> int:
         _publish_ebook(keeper, dest, staging_dir, args.enricher_url)
     for src, dest in passthrough_jobs:
         _passthrough(src, dest)
+
+    _save_ledger(ledger_path, ledger)
     return 0
 
 
