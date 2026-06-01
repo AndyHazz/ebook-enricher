@@ -377,3 +377,161 @@ def test_hardlinked_same_file_does_not_crash(tmp_path, mock_enricher):
     assert (sync / "BookWithHardlink" / "BookWithHardlink.epub").exists()
     # cover.jpg still exists (the original hardlink — we didn't delete it)
     assert dest_file.exists()
+
+
+# --------------------------------------------------------------------------
+# Idempotency: skip already-published destinations (protects manual edits
+# from being clobbered when a torrent recheck re-fires the autorun).
+# --------------------------------------------------------------------------
+
+def test_skips_publish_when_dest_exists(tmp_path, mock_enricher):
+    """If the destination EPUB already exists, the pipeline leaves it
+    untouched and does NOT call the enricher. This is the fix for manual
+    cover edits being reverted by a torrent recheck."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    # Pre-publish a hand-curated version at the dest
+    dest_dir = sync / "Ready Player One"
+    dest_dir.mkdir(parents=True)
+    dest_epub = dest_dir / "Ready Player One.epub"
+    dest_epub.write_bytes(b"MANUALLY-CURATED-DO-NOT-CLOBBER")
+
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+    # Dest is untouched
+    assert dest_epub.read_bytes() == b"MANUALLY-CURATED-DO-NOT-CLOBBER"
+    # Enricher was never called (nothing to enrich)
+    assert len(_MockEnricherHandler.received_paths) == 0
+    # Skip is logged
+    assert "skip" in result.stdout.lower() and "already published" in result.stdout.lower()
+
+
+def test_passthrough_skips_when_dest_exists(tmp_path, mock_enricher):
+    """A passthrough (non-ebook) file that already exists at the dest is
+    not re-copied."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    dest_dir = sync / "Ready Player One"
+    dest_dir.mkdir(parents=True)
+    dest_cover = dest_dir / "cover.jpg"
+    dest_cover.write_bytes(b"EXISTING-COVER")
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    assert dest_cover.read_bytes() == b"EXISTING-COVER"
+
+
+def test_overwrite_flag_forces_republish(tmp_path, mock_enricher):
+    """--overwrite republishes even when the dest exists (escape hatch)."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    dest_dir = sync / "Ready Player One"
+    dest_dir.mkdir(parents=True)
+    dest_epub = dest_dir / "Ready Player One.epub"
+    dest_epub.write_bytes(b"OLD")
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", mock_enricher,
+            "--overwrite",
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    # Dest was rebuilt from the seed + enriched
+    assert dest_epub.read_bytes() == b"epub-bytes-ENRICHED"
+
+
+# --------------------------------------------------------------------------
+# Sidecar relocation: the enricher writes <staging_stem>.original.jpg next
+# to the staging EPUB; the pipeline must move it alongside the published
+# book as <book>.original.jpg (not orphan it in .staging).
+# --------------------------------------------------------------------------
+
+class _SidecarEnricherHandler(http.server.BaseHTTPRequestHandler):
+    """Mock enricher that ALSO writes a sidecar next to the staging file,
+    mimicking cover.save_sidecar_if_absent."""
+
+    received_paths: list[str] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        data = json.loads(self.rfile.read(length).decode())
+        path = Path(data["path"])
+        _SidecarEnricherHandler.received_paths.append(str(path))
+        with open(path, "ab") as f:
+            f.write(b"-ENRICHED")
+        # Sidecar: <stem>.original.jpg in the same dir
+        sidecar = path.parent / (path.stem + ".original.jpg")
+        sidecar.write_bytes(b"ORIGINAL-COVER-BYTES")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"enriched"}')
+
+    def log_message(self, *a, **kw):
+        pass
+
+
+@pytest.fixture
+def sidecar_enricher():
+    _SidecarEnricherHandler.received_paths = []
+    server = http.server.HTTPServer(("127.0.0.1", 0), _SidecarEnricherHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{port}/enrich"
+    server.shutdown()
+
+
+def test_sidecar_relocated_alongside_dest(tmp_path, sidecar_enricher):
+    """After publishing, the enricher's staging sidecar is moved to
+    <book>.original.jpg next to the dest, and .staging holds no orphan."""
+    save, content = _make_torrent(tmp_path)
+    sync = tmp_path / "sync"
+    sync.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(content),
+            "--save-path", str(save),
+            "--sync-base", str(sync),
+            "--enricher-url", sidecar_enricher,
+        ],
+        check=True, capture_output=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    sidecar = sync / "Ready Player One" / "Ready Player One.original.jpg"
+    assert sidecar.exists(), "sidecar should be relocated alongside the book"
+    assert sidecar.read_bytes() == b"ORIGINAL-COVER-BYTES"
+    # No orphan left in .staging
+    staging = sync / ".staging"
+    orphans = list(staging.glob("*.original.jpg")) if staging.exists() else []
+    assert orphans == [], f"staging orphans left behind: {orphans}"

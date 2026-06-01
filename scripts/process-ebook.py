@@ -143,6 +143,31 @@ def _publish_ebook(
     os.replace(staging_path, dest)
     _apply_perms_from_parent(dest)
 
+    # The enricher writes the displaced original cover as a sidecar named
+    # <staging_stem>.original.jpg next to the staging EPUB (see
+    # cover.save_sidecar_if_absent). Relocate it alongside the published
+    # book as <book>.original.jpg — where the enricher's own in-place runs
+    # put it — instead of orphaning it in .staging. Only the .epub keeper
+    # is enriched, so only it can have a sidecar.
+    if keeper.suffix.lower() == ".epub":
+        _relocate_sidecar(staging_dir, staging_path, dest)
+
+
+def _relocate_sidecar(staging_dir: Path, staging_path: Path, dest: Path) -> None:
+    """Move the enricher's staging sidecar to <book>.original.jpg next to
+    dest. No-op if no sidecar was written. If a sidecar already exists at
+    the dest, drop the staging orphan rather than overwrite — the existing
+    sidecar holds the authoritative original."""
+    sidecar_src = staging_dir / (staging_path.stem + ".original.jpg")
+    if not sidecar_src.exists():
+        return
+    sidecar_dest = dest.parent / (dest.stem + ".original.jpg")
+    if sidecar_dest.exists():
+        sidecar_src.unlink()
+        return
+    os.replace(sidecar_src, sidecar_dest)
+    _apply_perms_from_parent(sidecar_dest)
+
 
 def _passthrough(src: Path, dest: Path) -> None:
     """Copy non-ebook file directly (no staging, no enrich).
@@ -184,6 +209,12 @@ def main() -> int:
     ap.add_argument("--enricher-url", required=True)
     ap.add_argument("--staging-subdir", default=".staging")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="republish even if the destination already exists "
+             "(default: skip already-published files to protect manual edits)",
+    )
     args = ap.parse_args()
 
     if not args.source.exists():
@@ -212,6 +243,28 @@ def main() -> int:
     ebook_jobs, passthrough_jobs = plan_actions(
         args.source, args.save_path, args.sync_base
     )
+
+    # Idempotency: skip jobs whose destination already exists, unless
+    # --overwrite. A static library torrent that gets rechecked or
+    # re-announced re-fires this autorun over its WHOLE content; without
+    # this guard, every already-published book is rebuilt from the seed
+    # and re-enriched, clobbering any manual cover/metadata curation on
+    # the library copy (the seed is never updated, so the rebuild always
+    # loses those edits). New books still publish normally because their
+    # dest doesn't exist yet.
+    if not args.overwrite:
+        kept_ebooks, kept_passthrough = [], []
+        for keeper, dest, losers in ebook_jobs:
+            if dest.exists():
+                print(f"skip (already published): {dest}")
+            else:
+                kept_ebooks.append((keeper, dest, losers))
+        for src, dest in passthrough_jobs:
+            if dest.exists():
+                print(f"skip (already published): {dest}")
+            else:
+                kept_passthrough.append((src, dest))
+        ebook_jobs, passthrough_jobs = kept_ebooks, kept_passthrough
 
     for keeper, dest, losers in ebook_jobs:
         print(f"keep: {keeper.name} -> {dest}")
