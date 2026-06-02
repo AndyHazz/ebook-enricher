@@ -254,3 +254,29 @@ mis-corrections. Then merge the branch.
 - **Applying canonical preference to the cover editions-fallback** — that path
   already filters by aspect/format/language; revisit only if a bad cover edition
   is observed.
+
+---
+
+## Amendment (2026-06-02, post-deploy) — Fix 2: skip non-canonical-only matches
+
+Live verification revealed two cases the original "soft, never exclude" policy
+mishandled:
+
+1. **Corrupted priors.** A book whose on-disk series tag was *already* corrupted
+   by the prior bad backfill (Small Gods → "Discworld on Radio") had its
+   `series_match` boost reinforce the corruption. Resolved operationally by
+   **resetting affected books from their torrent-source originals** (the
+   corruption was a one-time artifact), then re-enriching — not by a code change.
+
+2. **Poisoned canonical metadata.** When the canonical novel edition fails the
+   80% author gate (Mort's "Mort: A Novel of Discworld" had author
+   "Pratchett, Terry Reissue Edition" → 33%), the only gate-passing hit is the
+   box-set. "Soft, never exclude" would then apply the box-set's wrong index +
+   squashed cover.
+
+**Resolution (supersedes the "No hard exclusion" non-goal for this one case):**
+after ranking, if the chosen (top-ranked) candidate is itself non-canonical,
+`enrich_file` returns `low_confidence` (`reason="only_non_canonical_match"`) and
+writes nothing — leaving the existing tag/cover intact. A canonical edition, when
+present, still outranks non-canonical ones and writes normally, so this guard
+only fires when *every* confident candidate is non-canonical.
