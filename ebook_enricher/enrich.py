@@ -130,6 +130,14 @@ async def enrich_file(
     if chosen is None:
         return EnrichResult(status="low_confidence")
 
+    # Never let an adaptation/collection edition (radio/graphic/box-set/
+    # omnibus) be the one that writes metadata. If the best-ranked candidate
+    # is non-canonical, no canonical edition cleared the gate (or a corrupt
+    # existing tag pulled a non-canonical hit to the top) — skip rather than
+    # apply box-set indices / adaptation series + their wrong covers.
+    if is_non_canonical(chosen.title, chosen.series_name):
+        return EnrichResult(status="low_confidence", reason="only_non_canonical_match")
+
     updates = EpubMeta(
         title=meta.title,  # not written, but required by dataclass
         author=meta.author,

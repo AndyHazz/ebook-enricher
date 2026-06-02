@@ -796,11 +796,26 @@ async def test_match_prefers_canonical_when_no_existing_series(bare_epub: Path):
 
 
 @pytest.mark.asyncio
-async def test_match_falls_back_to_adaptation_when_only_option(bare_epub: Path):
-    """Soft, not hard: if the ONLY confident hit is an adaptation, still chosen."""
+async def test_match_skips_when_only_match_is_non_canonical(bare_epub: Path):
+    """If the ONLY gate-passing hit is an adaptation/box-set, skip it
+    (low_confidence) rather than applying box-set/adaptation metadata."""
     only = _make_hc_book(series_name="Some Series on Radio", series_position="4")
     with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[only])):
         result = await enrich_file(bare_epub, token="fake")
-    assert result.status == "enriched"
+    assert result.status == "low_confidence"
     meta = read_meta(bare_epub)
-    assert meta.series == "Some Series on Radio"
+    assert meta.series is None   # nothing applied
+
+
+@pytest.mark.asyncio
+async def test_match_skips_boxset_when_no_canonical_passes(bare_epub: Path):
+    """A box-set hit that clears the gate is still skipped when it's the
+    chosen (top-ranked) candidate — no canonical alternative qualified."""
+    boxset = _make_hc_book(
+        title="Test Book Title 1 to 5 books collection set: Test Book Title / B / C / D / E",
+        series_name="Some Series", series_position="1")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[boxset])):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "low_confidence"
+    meta = read_meta(bare_epub)
+    assert meta.series is None
