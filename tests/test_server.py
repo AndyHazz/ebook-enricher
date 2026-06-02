@@ -157,16 +157,19 @@ def test_enrich_endpoint_passes_correct_series(client, bare_epub: Path, monkeypa
     with patch("ebook_enricher.server.enrich_file", new=fake):
         resp = client.post("/enrich", json={"path": str(bare_epub)})
     assert resp.status_code == 200
+    fake.assert_awaited_once()
     _, kwargs = fake.await_args
     assert kwargs.get("correct_series") is True
     assert resp.json().get("series_corrected") is True
 
 
-def test_backfill_counts_series_corrected(client, tmp_path, monkeypatch):
+def test_backfill_counts_series_corrected(client, tmp_path, monkeypatch, bare_epub: Path):
     monkeypatch.setenv("HARDCOVER_TOKEN", "fake")
     import ebook_enricher.server as server
-    (tmp_path / "a.epub").write_bytes(b"x")
-    monkeypatch.setattr(server, "_ebooks_path", lambda: tmp_path)
+    books_dir = tmp_path / "books"
+    books_dir.mkdir()
+    import shutil; shutil.copy(bare_epub, books_dir / "a.epub")
+    monkeypatch.setattr(server, "_ebooks_path", lambda: books_dir)
     monkeypatch.setattr(server, "BACKFILL_DELAY_S", 0)
     fake = AsyncMock(return_value=EnrichResult(status="enriched", series="S",
                                                series_corrected=True))
@@ -175,5 +178,6 @@ def test_backfill_counts_series_corrected(client, tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["series_corrected"] == 1
+    fake.assert_awaited_once()
     _, kwargs = fake.await_args
     assert kwargs.get("correct_series") is True
