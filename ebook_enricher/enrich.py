@@ -2,7 +2,9 @@
 
 Pipeline:
   1. Read EPUB metadata.
-  2. If calibre:series is already set, skip (respect existing good data).
+  2. If calibre:series is already set and correct_series is False, skip
+     (respect existing good data); when correct_series is True, re-evaluate
+     and overwrite the series from Hardcover.
   3. Query Hardcover for top 3 matches by popularity.
   4. Iterate matches, first one passing is_confident_match wins.
   5. Write back only fields currently empty in the EPUB.

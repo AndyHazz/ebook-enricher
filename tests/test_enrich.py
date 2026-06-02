@@ -717,7 +717,7 @@ async def test_correct_series_preserves_on_standalone_hit(enriched_epub: Path):
     assert result.series_corrected is False
     meta = read_meta(enriched_epub)
     assert meta.series == "Existing Series"    # untouched
-    assert meta.series_index == "2"
+    assert meta.series_index == "2"            # index also untouched
 
 
 @pytest.mark.asyncio
@@ -742,3 +742,5 @@ async def test_correct_series_leaves_description_only_if_empty(enriched_epub: Pa
     assert result.status == "enriched"
     meta = read_meta(enriched_epub)
     assert meta.description == "Existing description."   # unchanged
+    assert meta.series == "Test Series"        # series WAS corrected
+    assert meta.series_index == "1.5"
