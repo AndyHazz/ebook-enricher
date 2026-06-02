@@ -15,6 +15,8 @@ Empty or whitespace-only inputs on either side are treated as a hard miss —
 ``partial_ratio('', '')`` returns 100 and would otherwise produce false
 positives when metadata is sparse.
 """
+from typing import Optional
+
 from rapidfuzz import fuzz
 
 TITLE_THRESHOLD = 80
@@ -74,7 +76,7 @@ _COLLECTION_MARKERS = (
 )
 
 
-def normalise_series_name(name: str) -> str:
+def normalise_series_name(name: Optional[str]) -> str:
     """Lowercase, strip surrounding whitespace, drop a leading 'the '.
     So 'The Culture' and 'Culture' compare equal. Returns '' for falsy input."""
     if not name:
@@ -85,7 +87,7 @@ def normalise_series_name(name: str) -> str:
     return n
 
 
-def is_non_canonical(title: str, series_name: str) -> bool:
+def is_non_canonical(title: Optional[str], series_name: Optional[str]) -> bool:
     """True if this hit looks like an adaptation (radio/graphic/audio) or a
     multi-book collection (box set/omnibus), based on keyword markers in the
     title or series name, OR a title that enumerates several books (>= 2
