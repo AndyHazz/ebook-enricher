@@ -43,9 +43,14 @@ class EnrichResult:
     status: Status
     reason: Optional[str] = None
     series: Optional[str] = None  # For debugging
+    series_corrected: bool = False  # True when correct_series changed name/index
 
 
-async def enrich_file(path: Path, token: str) -> EnrichResult:
+async def enrich_file(
+    path: Path,
+    token: str,
+    correct_series: bool = False,
+) -> EnrichResult:
     try:
         meta = read_meta(path)
     except FileNotFoundError:
@@ -54,7 +59,7 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         logger.exception("Failed to read EPUB %s", path)
         return EnrichResult(status="error", reason=f"read_failed: {e}")
 
-    if meta.series:
+    if meta.series and not correct_series:
         return EnrichResult(status="skipped", reason="already_enriched")
 
     try:
@@ -117,10 +122,25 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         title=meta.title,  # not written, but required by dataclass
         author=meta.author,
     )
-    if not meta.series and chosen.series_name:
+    if chosen.series_name and (correct_series or not meta.series):
         updates.series = chosen.series_name
-    if not meta.series_index and chosen.series_position:
+    if chosen.series_position and (correct_series or not meta.series_index):
         updates.series_index = chosen.series_position
+
+    # series_corrected: only True when we actually wrote a new, different
+    # value. The truthiness checks on updates.* mean the standalone case
+    # (Hardcover hit has no series -> updates.series stays None ->
+    # write_meta skips it -> existing tag survives) reports False.
+    series_corrected = correct_series and (
+        (bool(updates.series) and updates.series != meta.series)
+        or (bool(updates.series_index) and updates.series_index != meta.series_index)
+    )
+    if series_corrected:
+        logger.info(
+            "series corrected for %s: name %r -> %r, index %r -> %r",
+            path.name, meta.series, updates.series,
+            meta.series_index, updates.series_index,
+        )
     if not meta.description and chosen.description:
         updates.description = chosen.description
     if not meta.subjects and chosen.genres:
@@ -189,4 +209,8 @@ async def enrich_file(path: Path, token: str) -> EnrichResult:
         logger.exception("Failed to write EPUB %s", path)
         return EnrichResult(status="error", reason=f"write_failed: {e}")
 
-    return EnrichResult(status="enriched", series=chosen.series_name)
+    return EnrichResult(
+        status="enriched",
+        series=chosen.series_name,
+        series_corrected=series_corrected,
+    )

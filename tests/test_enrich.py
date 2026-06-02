@@ -663,3 +663,82 @@ async def test_enrich_resizes_oversized_cover(epub_with_cover):
     assert max(img.size) == MAX_COVER_LONG_EDGE
     # And the result is smaller than the original
     assert len(published) < len(big_bytes)
+
+
+@pytest.mark.asyncio
+async def test_correct_series_overwrites_name_and_index(enriched_epub: Path):
+    """correct_series=True overwrites an existing (wrong) series name AND
+    index from a confident Hardcover match."""
+    hc = _make_hc_book(series_name="Test Series", series_position="1.5")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is True
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Test Series"       # was "Existing Series"
+    assert meta.series_index == "1.5"          # was "2"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_populates_missing(bare_epub: Path):
+    """correct_series=True still populates a blank series (parity with the
+    default populate path), and reports it as a correction."""
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[_make_hc_book()])):
+        result = await enrich_file(bare_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is True
+    meta = read_meta(bare_epub)
+    assert meta.series == "Test Series"
+    assert meta.series_index == "1.5"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_preserves_on_low_confidence(enriched_epub: Path):
+    """No confident match -> existing series is NOT blanked/changed."""
+    hc = _make_hc_book(title="Totally Unrelated Book", author="Someone Else",
+                       series_name="Wrong Series", series_position="9")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "low_confidence"
+    assert result.series_corrected is False
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"    # untouched
+    assert meta.series_index == "2"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_preserves_on_standalone_hit(enriched_epub: Path):
+    """Confident match but Hardcover hit has no series -> existing series
+    is left intact, never blanked."""
+    hc = _make_hc_book(series_name=None, series_position=None)
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is False
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"    # untouched
+    assert meta.series_index == "2"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_false_keeps_skip(enriched_epub: Path):
+    """Default (correct_series=False) preserves the legacy skip behaviour."""
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock()) as mock:
+        result = await enrich_file(enriched_epub, token="fake", correct_series=False)
+    assert result.status == "skipped"
+    assert result.reason == "already_enriched"
+    mock.assert_not_awaited()
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_leaves_description_only_if_empty(enriched_epub: Path):
+    """Correcting series does NOT overwrite an existing description."""
+    hc = _make_hc_book(series_name="Test Series",
+                       description="A DIFFERENT description from Hardcover.")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    meta = read_meta(enriched_epub)
+    assert meta.description == "Existing description."   # unchanged
