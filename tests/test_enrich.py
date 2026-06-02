@@ -663,3 +663,159 @@ async def test_enrich_resizes_oversized_cover(epub_with_cover):
     assert max(img.size) == MAX_COVER_LONG_EDGE
     # And the result is smaller than the original
     assert len(published) < len(big_bytes)
+
+
+@pytest.mark.asyncio
+async def test_correct_series_overwrites_name_and_index(enriched_epub: Path):
+    """correct_series=True overwrites an existing (wrong) series name AND
+    index from a confident Hardcover match."""
+    hc = _make_hc_book(series_name="Test Series", series_position="1.5")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is True
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Test Series"       # was "Existing Series"
+    assert meta.series_index == "1.5"          # was "2"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_populates_missing(bare_epub: Path):
+    """correct_series=True still populates a blank series (parity with the
+    default populate path), and reports it as a correction."""
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[_make_hc_book()])):
+        result = await enrich_file(bare_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is True
+    meta = read_meta(bare_epub)
+    assert meta.series == "Test Series"
+    assert meta.series_index == "1.5"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_preserves_on_low_confidence(enriched_epub: Path):
+    """No confident match -> existing series is NOT blanked/changed."""
+    hc = _make_hc_book(title="Totally Unrelated Book", author="Someone Else",
+                       series_name="Wrong Series", series_position="9")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "low_confidence"
+    assert result.series_corrected is False
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"    # untouched
+    assert meta.series_index == "2"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_preserves_on_standalone_hit(enriched_epub: Path):
+    """Confident match but Hardcover hit has no series -> existing series
+    is left intact, never blanked."""
+    hc = _make_hc_book(series_name=None, series_position=None)
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    assert result.series_corrected is False
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"    # untouched
+    assert meta.series_index == "2"            # index also untouched
+
+
+@pytest.mark.asyncio
+async def test_correct_series_false_keeps_skip(enriched_epub: Path):
+    """Default (correct_series=False) preserves the legacy skip behaviour."""
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock()) as mock:
+        result = await enrich_file(enriched_epub, token="fake", correct_series=False)
+    assert result.status == "skipped"
+    assert result.reason == "already_enriched"
+    mock.assert_not_awaited()
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"
+
+
+@pytest.mark.asyncio
+async def test_correct_series_leaves_description_only_if_empty(enriched_epub: Path):
+    """Correcting series does NOT overwrite an existing description."""
+    hc = _make_hc_book(series_name="Test Series",
+                       description="A DIFFERENT description from Hardcover.")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[hc])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    meta = read_meta(enriched_epub)
+    assert meta.description == "Existing description."   # unchanged
+    assert meta.series == "Test Series"        # series WAS corrected
+    assert meta.series_index == "1.5"
+
+
+@pytest.mark.asyncio
+async def test_match_prefers_canonical_over_adaptation_with_existing_series(enriched_epub: Path):
+    """Existing series 'Existing Series'. Canonical hit matching that series
+    wins over an adaptation."""
+    adaptation = _make_hc_book(series_name="Existing Series on Radio", series_position="4")
+    canonical = _make_hc_book(series_name="Existing Series", series_position="13")
+    graphic = _make_hc_book(title="Test Book Title: A Graphic Novel",
+                            series_name="Existing Series Graphic Novels", series_position="4")
+    with patch("ebook_enricher.enrich.search_book",
+               new=AsyncMock(return_value=[adaptation, canonical, graphic])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    meta = read_meta(enriched_epub)
+    assert meta.series == "Existing Series"
+    assert meta.series_index == "13"
+
+
+@pytest.mark.asyncio
+async def test_match_prefers_novel_over_boxset_on_series_tie(enriched_epub: Path):
+    """Two hits share the existing series name (series_match ties); the box-set
+    is non-canonical so the novel wins."""
+    novel = _make_hc_book(series_name="Existing Series", series_position="4")
+    boxset = _make_hc_book(
+        title="Existing Series 1 to 5 books collection set: "
+              "Test Book Title / Second / Third / Fourth / Fifth",
+        series_name="Existing Series", series_position="1")
+    with patch("ebook_enricher.enrich.search_book",
+               new=AsyncMock(return_value=[boxset, novel])):
+        result = await enrich_file(enriched_epub, token="fake", correct_series=True)
+    assert result.status == "enriched"
+    meta = read_meta(enriched_epub)
+    assert meta.series_index == "4"
+
+
+@pytest.mark.asyncio
+async def test_match_prefers_canonical_when_no_existing_series(bare_epub: Path):
+    """No existing series -> series_match 0 for all; is_canonical breaks the tie
+    toward the novel."""
+    adaptation = _make_hc_book(series_name="Some Series on Radio", series_position="4")
+    novel = _make_hc_book(series_name="Some Series", series_position="9")
+    with patch("ebook_enricher.enrich.search_book",
+               new=AsyncMock(return_value=[adaptation, novel])):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "enriched"
+    meta = read_meta(bare_epub)
+    assert meta.series == "Some Series"
+    assert meta.series_index == "9"
+
+
+@pytest.mark.asyncio
+async def test_match_skips_when_only_match_is_non_canonical(bare_epub: Path):
+    """If the ONLY gate-passing hit is an adaptation/box-set, skip it
+    (low_confidence) rather than applying box-set/adaptation metadata."""
+    only = _make_hc_book(series_name="Some Series on Radio", series_position="4")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[only])):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "low_confidence"
+    meta = read_meta(bare_epub)
+    assert meta.series is None   # nothing applied
+
+
+@pytest.mark.asyncio
+async def test_match_skips_boxset_when_no_canonical_passes(bare_epub: Path):
+    """A box-set hit that clears the gate is still skipped when it's the
+    chosen (top-ranked) candidate — no canonical alternative qualified."""
+    boxset = _make_hc_book(
+        title="Test Book Title 1 to 5 books collection set: Test Book Title / B / C / D / E",
+        series_name="Some Series", series_position="1")
+    with patch("ebook_enricher.enrich.search_book", new=AsyncMock(return_value=[boxset])):
+        result = await enrich_file(bare_epub, token="fake")
+    assert result.status == "low_confidence"
+    meta = read_meta(bare_epub)
+    assert meta.series is None
