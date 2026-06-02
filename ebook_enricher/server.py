@@ -51,6 +51,7 @@ class BackfillSummary(BaseModel):
     auth_errors: int
     network_errors: int
     errors: int
+    series_corrected: int
 
 
 def _token() -> str:
@@ -68,7 +69,12 @@ def _ebooks_path() -> Path:
 
 
 def _result_to_dict(result: EnrichResult) -> dict:
-    return {"status": result.status, "reason": result.reason, "series": result.series}
+    return {
+        "status": result.status,
+        "reason": result.reason,
+        "series": result.series,
+        "series_corrected": result.series_corrected,
+    }
 
 
 @app.get("/health")
@@ -79,7 +85,7 @@ def health() -> dict:
 @app.post("/enrich")
 async def enrich(req: EnrichRequest) -> dict:
     token = _token()
-    result = await enrich_file(Path(req.path), token=token)
+    result = await enrich_file(Path(req.path), token=token, correct_series=True)
     _get_tracker().record(result)
     return _result_to_dict(result)
 
@@ -92,13 +98,14 @@ async def backfill() -> BackfillSummary:
         "total": 0, "enriched": 0, "skipped": 0, "no_match": 0,
         "low_confidence": 0, "rate_limited": 0,
         "auth_errors": 0, "network_errors": 0, "errors": 0,
+        "series_corrected": 0,
     }
     tracker = _get_tracker()
     for path in sorted(root.rglob("*.epub")):
         if path.name == STATUS_FILENAME:
             continue  # Don't try to enrich our own status file
         summary["total"] += 1
-        result = await enrich_file(path, token=token)
+        result = await enrich_file(path, token=token, correct_series=True)
         tracker.record(result)
         key = {
             "enriched": "enriched",
@@ -111,6 +118,8 @@ async def backfill() -> BackfillSummary:
             "error": "errors",
         }.get(result.status, "errors")
         summary[key] += 1
+        if result.series_corrected:
+            summary["series_corrected"] += 1
         logger.info("backfill %s -> %s (%s)", path.name, result.status, result.reason)
         await asyncio.sleep(BACKFILL_DELAY_S)
     return BackfillSummary(**summary)
