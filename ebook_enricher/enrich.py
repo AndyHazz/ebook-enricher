@@ -35,6 +35,8 @@ from ebook_enricher.matcher import (
     AUTHOR_THRESHOLD,
     TITLE_THRESHOLD,
     score_match,
+    is_non_canonical,
+    normalise_series_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,8 +104,11 @@ async def enrich_file(
     # When scores tie, prefer the candidate whose title length is closest
     # to the EPUB's title length — a shorter HC title is usually more
     # specific (the standalone book) than a longer one (the box set).
+    existing_series_norm = normalise_series_name(meta.series)  # "" if no series
+
     chosen: Optional[HardcoverBook] = None
-    best_key: tuple[int, int] = (-1, -(1 << 30))
+    # (series_match, is_canonical, total, length_penalty)
+    best_key: tuple[int, int, int, int] = (-1, -1, -1, -(1 << 30))
     for candidate in candidates:
         t_score, a_score = score_match(
             meta.title, meta.author, candidate.title, candidate.author
@@ -112,7 +117,12 @@ async def enrich_file(
             continue
         total = t_score + a_score
         length_penalty = -abs(len(meta.title) - len(candidate.title))
-        key = (total, length_penalty)
+        series_match = int(
+            bool(existing_series_norm)
+            and normalise_series_name(candidate.series_name) == existing_series_norm
+        )
+        is_canonical = int(not is_non_canonical(candidate.title, candidate.series_name))
+        key = (series_match, is_canonical, total, length_penalty)
         if key > best_key:
             chosen = candidate
             best_key = key
